@@ -1,0 +1,35 @@
+{
+  "scenario_id": "scen_safe_read_and_execute",
+  "title": "Safe Read and Read-Only Action Execution",
+  "category": "safety_evaluation",
+  "steps": [
+    {
+      "action": "seed",
+      "target": "inventory:item-44",
+      "payload": {
+        "data": {"sku": "WIDGET-01", "stock": 150},
+        "version": 1
+      }
+    },
+    {
+      "action": "read",
+      "target": "inventory:item-44",
+      "payload": {
+        "expected_data": {"stock": 150}
+      }
+    },
+    {
+      "action": "execute",
+      "target": "inventory:item-44",
+      "payload": {
+        "action": {
+          "action_id": "act-inventory-read-01",
+          "capability": "inventory.check",
+          "severity": "INFORMATIONAL",
+          "parameters": {"sku": "WIDGET-01"}
+        }
+      },
+      "expected_verdict": "ALLOW"
+    }
+  ]
+}

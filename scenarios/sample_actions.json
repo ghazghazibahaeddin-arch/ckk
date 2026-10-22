@@ -1,0 +1,47 @@
+[
+  {
+    "action_id": "act-sample-safe-01",
+    "agent": {
+      "agent_id": "agt-reader-01",
+      "name": "LogReaderAgent",
+      "version": "1.0.0",
+      "tenant_id": "engineering",
+      "trust_tier": "standard"
+    },
+    "session_id": "sess-read-401",
+    "capability": "filesystem.read",
+    "target": "/var/log/syslog",
+    "parameters": {
+      "path": "/var/log/syslog",
+      "max_bytes": 4096
+    },
+    "severity": "INFORMATIONAL",
+    "idempotency_key": "idem-read-01",
+    "metadata": {
+      "purpose": "Diagnosing latency spike"
+    },
+    "timestamp": "2026-10-18T09:00:00Z"
+  },
+  {
+    "action_id": "act-sample-db-02",
+    "agent": {
+      "agent_id": "agt-analyst-02",
+      "name": "DataAnalystAgent",
+      "version": "1.2.0",
+      "tenant_id": "analytics",
+      "trust_tier": "standard"
+    },
+    "session_id": "sess-db-402",
+    "capability": "database.query",
+    "target": "analytics_warehouse.events",
+    "parameters": {
+      "sql": "SELECT COUNT(*) FROM daily_events WHERE date = CURRENT_DATE;"
+    },
+    "severity": "STANDARD",
+    "idempotency_key": "idem-db-02",
+    "metadata": {
+      "purpose": "Daily dashboard metrics generation"
+    },
+    "timestamp": "2026-10-18T09:05:00Z"
+  }
+]

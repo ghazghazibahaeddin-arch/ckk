@@ -1,0 +1,6 @@
+{
+  "name": "CCK - AI Agent Action Control & Reliability Platform",
+  "description": "منصة موثوقية وتحكم لأفعال وكلاء الذكاء الاصطناعي الخارجية - Modular Monolith Engine, CLI, API & Architecture",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,24 @@
+{
+  "action_id": "act-rate-limit-001",
+  "agent": {
+    "agent_id": "agt-scraper-bot",
+    "name": "MarketIntelligenceScraper",
+    "version": "3.0.1",
+    "tenant_id": "market-research",
+    "trust_tier": "standard"
+  },
+  "session_id": "sess-scrape-8821",
+  "capability": "api.http_request",
+  "target": "https://api.thirdparty.com/v1/market/prices/batch",
+  "parameters": {
+    "method": "POST",
+    "batch_size": 10000,
+    "concurrency": 50
+  },
+  "severity": "MUTATION",
+  "idempotency_key": "idem-scrape-001",
+  "metadata": {
+    "purpose": "Batch price sync"
+  },
+  "timestamp": "2026-10-18T09:20:00Z"
+}

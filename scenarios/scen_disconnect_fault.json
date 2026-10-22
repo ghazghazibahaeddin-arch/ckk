@@ -1,0 +1,22 @@
+{
+  "scenario_id": "scen_disconnect_fault",
+  "title": "Disconnection During Network Execution",
+  "category": "fault_injection",
+  "steps": [
+    {
+      "action": "seed",
+      "target": "crm.contact:usr-772",
+      "payload": {
+        "data": {"email": "lead@company.com", "status": "active"},
+        "version": 1
+      }
+    },
+    {
+      "action": "inject_fault",
+      "target": "crm.contact:usr-772",
+      "payload": {
+        "fault": "disconnect_during"
+      }
+    }
+  ]
+}

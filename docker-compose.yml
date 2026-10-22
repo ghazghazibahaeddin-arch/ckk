@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  cck-engine:
+    build: .
+    container_name: cck-control-plane
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - CCK_SQLITE_DB_PATH=/app/data/cck_prod.db
+    volumes:
+      - cck_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  cck_data:

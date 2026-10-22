@@ -1,0 +1,28 @@
+{
+  "scenario_id": "scen_system_mutation_approval",
+  "title": "System Mutation Requires Human Approval POL-SEC-003",
+  "category": "governance_approval",
+  "steps": [
+    {
+      "action": "seed",
+      "target": "server.systemd",
+      "payload": {
+        "data": {"service": "production-api", "status": "running"},
+        "version": 1
+      }
+    },
+    {
+      "action": "execute",
+      "target": "server.systemd",
+      "payload": {
+        "action": {
+          "action_id": "act-stop-service-01",
+          "capability": "bash.execute",
+          "severity": "MUTATION",
+          "parameters": {"command": "systemctl stop production-api"}
+        }
+      },
+      "expected_verdict": "REQUIRE_APPROVAL"
+    }
+  ]
+}

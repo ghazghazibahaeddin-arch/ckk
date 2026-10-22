@@ -1,0 +1,28 @@
+{
+  "scenario_id": "scen_destructive_blocked",
+  "title": "Destructive Command Blocked by Policy POL-SEC-001",
+  "category": "policy_enforcement",
+  "steps": [
+    {
+      "action": "seed",
+      "target": "server.root",
+      "payload": {
+        "data": {"hostname": "prod-node-1"},
+        "version": 1
+      }
+    },
+    {
+      "action": "execute",
+      "target": "server.root",
+      "payload": {
+        "action": {
+          "action_id": "act-rm-prod-01",
+          "capability": "bash.execute",
+          "severity": "DESTRUCTIVE",
+          "parameters": {"command": "rm -rf / --no-preserve-root"}
+        }
+      },
+      "expected_verdict": "BLOCK"
+    }
+  ]
+}

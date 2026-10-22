@@ -1,0 +1,23 @@
+{
+  "action_id": "act-mutation-sys-001",
+  "agent": {
+    "agent_id": "agt-sysadmin-ai",
+    "name": "SysAdminAssistant",
+    "version": "1.4.0",
+    "tenant_id": "platform-ops",
+    "trust_tier": "standard"
+  },
+  "session_id": "sess-ops-5510",
+  "capability": "bash.execute",
+  "target": "server.prod.gateway",
+  "parameters": {
+    "command": "systemctl stop production-gateway.service",
+    "elevated_sudo": true
+  },
+  "severity": "MUTATION",
+  "idempotency_key": "idem-mut-001",
+  "metadata": {
+    "reason": "Applying patch"
+  },
+  "timestamp": "2026-10-18T09:25:00Z"
+}

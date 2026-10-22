@@ -1,0 +1,22 @@
+{
+  "scenario_id": "scen_timeout_fault_injection",
+  "title": "Network Timeout Injection on External API Call",
+  "category": "fault_injection",
+  "steps": [
+    {
+      "action": "seed",
+      "target": "payment:tx-9901",
+      "payload": {
+        "data": {"amount": 250.0, "status": "pending"},
+        "version": 1
+      }
+    },
+    {
+      "action": "inject_fault",
+      "target": "payment:tx-9901",
+      "payload": {
+        "fault": "timeout"
+      }
+    }
+  ]
+}

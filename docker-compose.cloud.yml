@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cck-cloud-postgres
+    environment:
+      POSTGRES_DB: cck_cloud
+      POSTGRES_USER: cck_admin
+      POSTGRES_PASSWORD: cck_secure_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - cck_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cck_admin -d cck_cloud"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  cck-cloud-api:
+    build: .
+    container_name: cck-cloud-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - CCK_DATABASE_URL=postgresql://cck_admin:cck_secure_password@postgres:5432/cck_cloud
+      - CCK_DEFAULT_RISK_THRESHOLD=0.7
+      - CCK_ENABLE_TAMPER_EVIDENT_CHAIN=true
+    restart: unless-stopped
+
+  cck-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cck-cloud-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    restart: unless-stopped
+
+volumes:
+  cck_pgdata:

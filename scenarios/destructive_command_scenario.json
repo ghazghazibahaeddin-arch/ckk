@@ -1,0 +1,23 @@
+{
+  "action_id": "act-danger-rm-001",
+  "agent": {
+    "agent_id": "agt-cleanup-bot",
+    "name": "AutomatedDiskCleanup",
+    "version": "0.9.1",
+    "tenant_id": "infra-ops",
+    "trust_tier": "sandboxed"
+  },
+  "session_id": "sess-cleanup-99",
+  "capability": "bash.execute",
+  "target": "server.root",
+  "parameters": {
+    "command": "rm -rf / --no-preserve-root",
+    "timeout_seconds": 30
+  },
+  "severity": "DESTRUCTIVE",
+  "idempotency_key": "idem-danger-01",
+  "metadata": {
+    "intent": "Free up space on disk"
+  },
+  "timestamp": "2026-10-18T09:15:00Z"
+}

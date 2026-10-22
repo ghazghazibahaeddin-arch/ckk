@@ -1,0 +1,23 @@
+{
+  "scenario_id": "scen_stale_fact_01",
+  "title": "Order status changed between read and write",
+  "category": "stale_fact",
+  "steps": [
+    {
+      "action": "seed",
+      "target": "order:101",
+      "payload": {
+        "data": {"status": "paid"},
+        "version": 1
+      }
+    },
+    {
+      "action": "mutate_world",
+      "target": "order:101",
+      "payload": {
+        "data": {"status": "refunded"},
+        "version": 2
+      }
+    }
+  ]
+}
