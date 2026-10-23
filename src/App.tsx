@@ -36,7 +36,6 @@ import {
   ExternalLink,
   Menu,
   X,
-  Globe,
   Moon,
   Sun,
   GitBranch,
@@ -93,7 +92,7 @@ interface FactItem {
   value: unknown;
   source: string;
   version: number;
-  state: string;
+  state: 'VALID' | 'INVALIDATED' | 'STALE' | 'UNKNOWN';
   evidence_id?: string;
   observed_at: string;
   ttl_seconds?: number;
@@ -150,7 +149,7 @@ interface AuditRecordItem {
   action_hash: string;
   previous_hash: string;
   verdict: {
-    decision: string;
+    decision: 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL' | 'REVALIDATE';
     risk_score: number;
     reasoning?: string;
   };
@@ -197,7 +196,6 @@ export default function App() {
   // Navigation & Viewport State
   const [activeSection, setActiveSection] = useState<NavSection>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [lang, setLang] = useState<'ar' | 'en'>('en');
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
   // Backend Health & System Status
@@ -209,7 +207,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState({
     userId: 'usr-admin-01',
     username: 'admin',
-    displayName: 'Security Admin',
+    displayName: 'Lead Security Architect',
     role: 'admin',
     tenantId: 'tenant-corp-acme',
   });
@@ -249,7 +247,7 @@ export default function App() {
   const [newDepEntity, setNewDepEntity] = useState('order:1099');
   const [newDepField, setNewDepField] = useState('status');
 
-  // Action Gate & Playground State
+  // Action Gate & Live Evaluator State
   const [gateCapability, setGateCapability] = useState('logistics.ship');
   const [gateTarget, setGateTarget] = useState('courier.fedex');
   const [gateCommand, setGateCommand] = useState('dispatch_parcel(order_id="1099")');
@@ -558,10 +556,7 @@ export default function App() {
         showNotification(err.detail || 'Evaluation failed', 'error');
       }
     } catch {
-      showNotification(
-        lang === 'ar' ? 'تعذر الاتصال بمحرك Action Gate' : 'Could not reach Action Gate backend',
-        'error'
-      );
+      showNotification('Could not reach Action Gate backend', 'error');
     } finally {
       setEvaluatingGate(false);
     }
@@ -585,11 +580,8 @@ export default function App() {
       });
 
       if (res.ok) {
-        const data = await res.json();
         showNotification(
-          lang === 'ar'
-            ? `تم تحديث الحقيقة بنجاح: تم إبطال ${entityId}.${fieldName} (القيمة الجديدة: ${newValue})! جرب الآن تقييم الفعل logistics.ship.`
-            : `Fact invalidated: ${entityId}.${fieldName} is now '${newValue}'. Evaluate logistics.ship to see Action Gate block execution!`,
+          `Fact updated: ${entityId}.${fieldName} state is now '${newValue}'. Evaluate logistics.ship to see Action Gate enforce precondition block!`,
           'success'
         );
         fetchFacts();
@@ -599,10 +591,7 @@ export default function App() {
         showNotification(err.detail || 'Failed to invalidate fact', 'error');
       }
     } catch {
-      showNotification(
-        lang === 'ar' ? 'خطأ أثناء إبطال الحقيقة' : 'Failed to reach backend to invalidate fact',
-        'error'
-      );
+      showNotification('Failed to reach backend to invalidate fact', 'error');
     } finally {
       setInvalidatingFact(false);
     }
@@ -624,13 +613,10 @@ export default function App() {
         const data = await res.json();
         setNewlyCreatedKey(data);
         fetchApiKeys(activeProjectId);
-        showNotification(
-          lang === 'ar' ? 'تم إنشاء مفتاح API بنجاح؛ انسخ الرمز السري الآن.' : 'API Key issued successfully.',
-          'success'
-        );
+        showNotification('API Key issued successfully. Copy your plaintext token now.', 'success');
       }
     } catch {
-      showNotification(lang === 'ar' ? 'فشل إنشاء المفتاح' : 'Failed to issue API key', 'error');
+      showNotification('Failed to issue API key', 'error');
     }
   };
 
@@ -638,17 +624,17 @@ export default function App() {
   // Revoke API Key
   // -----------------------------------------------------------
   const handleRevokeApiKey = async (keyId: string) => {
-    if (!window.confirm(lang === 'ar' ? 'هل تريد بالتأكيد إبطال هذا المفتاح؟' : 'Revoke this API Key?')) return;
+    if (!window.confirm('Are you sure you want to revoke this API key immediately?')) return;
     try {
       const res = await fetch(`/api/v1/projects/${activeProjectId}/keys/${keyId}`, {
         method: 'DELETE',
       });
       if (res.ok) {
-        showNotification(lang === 'ar' ? 'تم إبطال المفتاح فورياً' : 'Key revoked immediately', 'info');
+        showNotification('Key revoked immediately.', 'info');
         fetchApiKeys(activeProjectId);
       }
     } catch {
-      showNotification(lang === 'ar' ? 'فشل إبطال المفتاح' : 'Failed to revoke key', 'error');
+      showNotification('Failed to revoke key', 'error');
     }
   };
 
@@ -678,14 +664,11 @@ export default function App() {
         setShowNewProjectModal(false);
         setNewProjectName('');
         setNewProjectDesc('');
-        showNotification(
-          lang === 'ar' ? `تم إنشاء المشروع: ${created.name}` : `Project created: ${created.name}`,
-          'success'
-        );
+        showNotification(`Project created: ${created.name}`, 'success');
         fetchStatus();
       }
     } catch {
-      showNotification(lang === 'ar' ? 'فشل إنشاء المشروع' : 'Failed to create project', 'error');
+      showNotification('Failed to create project', 'error');
     }
   };
 
@@ -707,13 +690,13 @@ export default function App() {
         }),
       });
       if (res.ok) {
-        showNotification(lang === 'ar' ? 'تم تسجيل الحقيقة بنجاح' : 'Fact saved successfully', 'success');
+        showNotification('Fact recorded successfully in the Grounded Registry.', 'success');
         setShowAddFactModal(false);
         fetchFacts();
         fetchStatus();
       }
     } catch {
-      showNotification(lang === 'ar' ? 'فشل حفظ الحقيقة' : 'Failed to save fact', 'error');
+      showNotification('Failed to save fact', 'error');
     }
   };
 
@@ -732,12 +715,12 @@ export default function App() {
         }),
       });
       if (res.ok) {
-        showNotification(lang === 'ar' ? 'تم تسجيل شرط الاعتماد' : 'Dependency precondition registered', 'success');
+        showNotification('Dependency precondition rule registered.', 'success');
         setShowAddDepModal(false);
         fetchDependencies(activeProjectId);
       }
     } catch {
-      showNotification(lang === 'ar' ? 'فشل تسجيل الاعتماد' : 'Failed to register dependency', 'error');
+      showNotification('Failed to register dependency', 'error');
     }
   };
 
@@ -752,15 +735,13 @@ export default function App() {
         const data = await res.json();
         setScenarioReport(data);
         showNotification(
-          lang === 'ar'
-            ? `اكتمل تشغيل السيناريوهات: ${data.passed}/${data.total} ناجحة في ${data.duration_seconds} ثانية.`
-            : `Scenarios completed: ${data.passed}/${data.total} passed in ${data.duration_seconds}s.`,
+          `Scenarios completed: ${data.passed}/${data.total} passed in ${data.duration_seconds}s.`,
           'success'
         );
         fetchStatus();
       }
     } catch {
-      showNotification(lang === 'ar' ? 'فشل تشغيل السيناريوهات' : 'Failed to execute test scenarios', 'error');
+      showNotification('Failed to execute test scenarios', 'error');
     } finally {
       setRunningScenarios(false);
     }
@@ -778,7 +759,7 @@ export default function App() {
         setChainVerify(data);
       }
     } catch {
-      showNotification(lang === 'ar' ? 'فشل التحقق من السلسلة' : 'Failed to verify hash chain', 'error');
+      showNotification('Failed to verify cryptographic hash chain', 'error');
     } finally {
       setVerifyingChain(false);
     }
@@ -802,16 +783,14 @@ export default function App() {
       if (res.ok) {
         setApprovals((prev) => prev.filter((a) => a.approval_id !== approvalId));
         showNotification(
-          lang === 'ar'
-            ? `تم ${approved ? 'اعتماد' : 'رفض'} الطلب ${approvalId} وتدوينه في سجل التدقيق المشفر.`
-            : `Approval ${approvalId} ${approved ? 'approved' : 'rejected'} and signed to audit ledger.`,
+          `Approval ${approvalId} ${approved ? 'approved' : 'rejected'} and signed to audit ledger.`,
           'success'
         );
         fetchAudits();
         fetchStatus();
       }
     } catch {
-      showNotification(lang === 'ar' ? 'فشل إرسال قرار الاعتماد' : 'Failed to resolve approval', 'error');
+      showNotification('Failed to resolve approval', 'error');
     }
   };
 
@@ -837,22 +816,17 @@ export default function App() {
           tenantId: data.user.tenant_id,
         });
         setShowAuthModal(false);
-        showNotification(
-          lang === 'ar'
-            ? `مرحباً بك مجدداً، ${data.user.display_name}!`
-            : `Welcome, ${data.user.display_name}!`,
-          'success'
-        );
+        showNotification(`Welcome, ${data.user.display_name}!`, 'success');
       } else {
         const err = await res.json();
         showNotification(err.detail || 'Authentication failed', 'error');
       }
     } catch {
-      showNotification(lang === 'ar' ? 'خطأ في المصادقة' : 'Auth error', 'error');
+      showNotification('Authentication error', 'error');
     }
   };
 
-  // Direction and Color theme class names
+  // Visual Theme styling
   const isDark = theme === 'dark';
   const bgMain = isDark ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900';
   const bgCard = isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm';
@@ -861,23 +835,23 @@ export default function App() {
   const borderSubtle = isDark ? 'border-slate-800' : 'border-slate-200';
 
   const navItems = [
-    { id: 'overview' as NavSection, labelAr: 'لوحة القيادة', labelEn: 'Dashboard', icon: Activity },
-    { id: 'architecture' as NavSection, labelAr: 'المشكلة والمعمارية', labelEn: 'Architecture & Value', icon: Layers },
-    { id: 'projects' as NavSection, labelAr: 'إدارة المشاريع', labelEn: 'Projects', icon: Cloud, badge: projects.length },
-    { id: 'apikeys' as NavSection, labelAr: 'مفاتيح الربط (API Keys)', labelEn: 'API Keys', icon: Key },
-    { id: 'integrations' as NavSection, labelAr: 'بوابة التكاملات (MCP & SDK)', labelEn: 'Integrations Hub', icon: Terminal },
-    { id: 'facts' as NavSection, labelAr: 'الحقائق والأدلة', labelEn: 'Facts & Evidence', icon: Database, badge: facts.length },
-    { id: 'dependencies' as NavSection, labelAr: 'شبكة الاعتمادات', labelEn: 'Dependencies', icon: GitBranch, badge: dependencies.length },
-    { id: 'actiongate' as NavSection, labelAr: 'بوابة الأفعال (Action Gate)', labelEn: 'Action Gate', icon: ShieldCheck },
-    { id: 'approvals' as NavSection, labelAr: 'الموافقات البشرية', labelEn: 'Human Approvals', icon: CheckSquare, badge: approvals.length },
-    { id: 'audit' as NavSection, labelAr: 'سجل التدقيق المشفر', labelEn: 'Audit Ledger', icon: Fingerprint, badge: audits.length },
-    { id: 'scenarios' as NavSection, labelAr: 'مختبر السيناريوهات', labelEn: 'Scenarios Lab', icon: Play },
-    { id: 'diagnostics' as NavSection, labelAr: 'صحة النظام والتفاصيل', labelEn: 'Diagnostics & Health', icon: Cpu },
+    { id: 'overview' as NavSection, label: 'Dashboard Overview', icon: Activity },
+    { id: 'architecture' as NavSection, label: 'Causal Continuity & Value', icon: Layers },
+    { id: 'projects' as NavSection, label: 'Workspaces & Projects', icon: Cloud, badge: projects.length },
+    { id: 'apikeys' as NavSection, label: 'API Keys & Credentials', icon: Key },
+    { id: 'integrations' as NavSection, label: 'Integrations & MCP Hub', icon: Terminal },
+    { id: 'facts' as NavSection, label: 'Facts & Evidence Registry', icon: Database, badge: facts.length },
+    { id: 'dependencies' as NavSection, label: 'Dependency Graph', icon: GitBranch, badge: dependencies.length },
+    { id: 'actiongate' as NavSection, label: 'Action Gate Console', icon: ShieldCheck },
+    { id: 'approvals' as NavSection, label: 'Human Approval Queue', icon: CheckSquare, badge: approvals.length },
+    { id: 'audit' as NavSection, label: 'Cryptographic Audit Ledger', icon: Fingerprint, badge: audits.length },
+    { id: 'scenarios' as NavSection, label: 'Scenarios Testing Lab', icon: Play },
+    { id: 'diagnostics' as NavSection, label: 'Diagnostics & System Health', icon: Cpu },
   ];
 
   return (
     <div
-      dir={lang === 'ar' ? 'rtl' : 'ltr'}
+      dir="ltr"
       className={`min-h-screen flex flex-col font-sans transition-colors duration-200 selection:bg-cyan-500 selection:text-white ${bgMain}`}
     >
       {/* ------------------------------------------------------- */}
@@ -886,7 +860,7 @@ export default function App() {
       <header className={`sticky top-0 z-40 border-b backdrop-blur-md ${isDark ? 'bg-slate-900/90 border-slate-800' : 'bg-white/90 border-slate-200 shadow-xs'}`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           {/* Logo & Mobile Menu Button */}
-          <div className="flex items-center space-x-3 rtl:space-x-reverse">
+          <div className="flex items-center space-x-3">
             <button
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
               className="md:hidden p-2 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 focus:outline-none"
@@ -900,26 +874,26 @@ export default function App() {
             </div>
 
             <div>
-              <div className="flex items-center space-x-2 rtl:space-x-reverse">
+              <div className="flex items-center space-x-2">
                 <span className="font-bold text-lg tracking-tight font-mono">CCK Platform</span>
                 <span className="hidden sm:inline-flex px-2 py-0.5 text-[10px] font-semibold rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-mono">
-                  SaaS v1.0
+                  v0.1.0 Production
                 </span>
               </div>
               <p className={`text-[11px] ${textMuted} hidden sm:block`}>
-                {lang === 'ar' ? 'منصة تحكم وموثوقية لأفعال وكلاء الذكاء الاصطناعي' : 'Action Gate & Grounded Reliability for AI Agents'}
+                Agent Reliability & Causal Continuity Platform
               </p>
             </div>
           </div>
 
           {/* Center: Project Selector */}
-          <div className="hidden lg:flex items-center space-x-2 rtl:space-x-reverse">
-            <span className={`text-xs ${textMuted}`}>{lang === 'ar' ? 'المشروع النشط:' : 'Active Project:'}</span>
+          <div className="hidden lg:flex items-center space-x-2">
+            <span className={`text-xs ${textMuted}`}>Active Workspace:</span>
             <div className="relative">
               <select
                 value={activeProjectId}
                 onChange={(e) => setActiveProjectId(e.target.value)}
-                className={`text-xs font-mono py-1.5 px-3 rounded-lg border appearance-none pr-8 rtl:pr-3 rtl:pl-8 font-medium cursor-pointer ${
+                className={`text-xs font-mono py-1.5 px-3 rounded-lg border appearance-none pr-8 font-medium cursor-pointer ${
                   isDark ? 'bg-slate-800 border-slate-700 text-cyan-300' : 'bg-slate-100 border-slate-300 text-slate-800'
                 }`}
               >
@@ -929,15 +903,15 @@ export default function App() {
                   </option>
                 ))}
               </select>
-              <ChevronDown className="w-3.5 h-3.5 absolute top-1/2 -translate-y-1/2 right-2.5 rtl:right-auto rtl:left-2.5 pointer-events-none text-slate-400" />
+              <ChevronDown className="w-3.5 h-3.5 absolute top-1/2 -translate-y-1/2 right-2.5 pointer-events-none text-slate-400" />
             </div>
           </div>
 
           {/* Right Tools & User Session */}
-          <div className="flex items-center space-x-2 sm:space-x-3 rtl:space-x-reverse">
+          <div className="flex items-center space-x-2 sm:space-x-3">
             {/* Live Engine Indicator */}
             <div
-              className={`flex items-center space-x-1.5 rtl:space-x-reverse px-2.5 py-1 rounded-full text-xs font-medium border font-mono ${
+              className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium border font-mono ${
                 isBackendLive
                   ? isDark
                     ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
@@ -947,24 +921,12 @@ export default function App() {
             >
               <span className={`w-2 h-2 rounded-full ${isBackendLive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
               <span className="text-[11px] hidden sm:inline">
-                {isBackendLive ? (lang === 'ar' ? 'محرك حي (SQLite WAL)' : 'Live SQLite WAL') : 'Connecting...'}
+                {isBackendLive ? 'Live Engine (SQLite WAL)' : 'Connecting...'}
               </span>
             </div>
 
             {/* PWA Install Button */}
             <PWAInstallButton />
-
-            {/* Language Toggle */}
-            <button
-              onClick={() => setLang(lang === 'ar' ? 'en' : 'ar')}
-              className={`p-1.5 rounded-lg border text-xs flex items-center space-x-1 rtl:space-x-reverse font-mono transition-colors ${
-                isDark ? 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white' : 'bg-slate-100 border-slate-300 text-slate-700 hover:text-slate-900'
-              }`}
-              title="Toggle Language (العربية / English)"
-            >
-              <Globe className="w-3.5 h-3.5" />
-              <span>{lang === 'ar' ? 'EN' : 'عربي'}</span>
-            </button>
 
             {/* Dark / Light Toggle */}
             <button
@@ -980,7 +942,7 @@ export default function App() {
             {/* User Session */}
             <button
               onClick={() => setShowAuthModal(true)}
-              className={`flex items-center space-x-1.5 rtl:space-x-reverse px-2.5 py-1.5 rounded-lg border text-xs transition-colors ${
+              className={`flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg border text-xs transition-colors ${
                 isDark ? 'bg-slate-800 border-slate-700 hover:border-slate-600 text-slate-200' : 'bg-slate-100 border-slate-300 hover:border-slate-400 text-slate-800'
               }`}
             >
@@ -996,7 +958,7 @@ export default function App() {
       {/* ------------------------------------------------------- */}
       {notice && (
         <div
-          className={`fixed bottom-4 left-4 right-4 sm:left-auto sm:right-6 sm:w-96 z-50 p-4 rounded-xl shadow-lg border flex items-start space-x-3 rtl:space-x-reverse animate-in fade-in duration-200 ${
+          className={`fixed bottom-4 right-4 sm:right-6 sm:w-96 z-50 p-4 rounded-xl shadow-lg border flex items-start space-x-3 animate-in fade-in duration-200 ${
             notice.type === 'error'
               ? 'bg-rose-950 border-rose-700 text-rose-200'
               : notice.type === 'info'
@@ -1029,7 +991,7 @@ export default function App() {
           <div className={`rounded-2xl border p-3 flex flex-col h-full ${bgCard}`}>
             {mobileMenuOpen && (
               <div className="flex items-center justify-between mb-4 md:hidden pb-2 border-b border-slate-700">
-                <span className="font-bold text-sm">{lang === 'ar' ? 'القائمة الرئيسية' : 'Navigation Menu'}</span>
+                <span className="font-bold text-sm">Navigation Menu</span>
                 <button onClick={() => setMobileMenuOpen(false)} className="p-1 rounded-md text-slate-400">
                   <X className="w-5 h-5" />
                 </button>
@@ -1037,7 +999,7 @@ export default function App() {
             )}
 
             <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 px-3 py-1 mb-1 font-mono">
-              {lang === 'ar' ? 'منصة CCK للمطورين' : 'DEVELOPER CONSOLE'}
+              DEVELOPER CONSOLE
             </div>
 
             <nav className="space-y-1 flex-1">
@@ -1061,9 +1023,9 @@ export default function App() {
                         : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                     }`}
                   >
-                    <div className="flex items-center space-x-2.5 rtl:space-x-reverse">
+                    <div className="flex items-center space-x-2.5">
                       <Icon className={`w-4 h-4 ${active ? 'text-cyan-400' : 'text-slate-400'}`} />
-                      <span>{lang === 'ar' ? item.labelAr : item.labelEn}</span>
+                      <span>{item.label}</span>
                     </div>
                     {item.badge !== undefined && item.badge > 0 && (
                       <span
@@ -1086,11 +1048,11 @@ export default function App() {
             {/* Quick Project Info in Sidebar */}
             <div className={`mt-4 pt-3 border-t rounded-xl p-2.5 ${borderSubtle} ${bgSubtle}`}>
               <div className="flex items-center justify-between text-[11px] mb-1">
-                <span className={textMuted}>{lang === 'ar' ? 'المستأجر:' : 'Tenant:'}</span>
+                <span className={textMuted}>Tenant ID:</span>
                 <span className="font-mono text-xs font-semibold">{currentUser.tenantId}</span>
               </div>
               <div className="flex items-center justify-between text-[11px]">
-                <span className={textMuted}>{lang === 'ar' ? 'قاعدة البيانات:' : 'DB:'}</span>
+                <span className={textMuted}>Storage:</span>
                 <span className="font-mono text-[10px] text-emerald-400 font-medium">SQLite WAL</span>
               </div>
             </div>
@@ -1107,21 +1069,19 @@ export default function App() {
               {/* Header Value Card */}
               <div className={`rounded-2xl border p-6 relative overflow-hidden ${bgCard}`}>
                 <div className="max-w-2xl">
-                  <div className="flex items-center space-x-2 rtl:space-x-reverse mb-3">
+                  <div className="flex items-center space-x-2 mb-3">
                     <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                      ● {lang === 'ar' ? 'نظام الحماية مفعل' : 'Action Gate Active'}
+                      ● Action Gate Active
                     </span>
                     <span className="text-xs text-slate-400 font-mono">{activeProjectId}</span>
                   </div>
                   <h1 className="text-xl sm:text-2xl font-bold tracking-tight mb-2">
-                    {lang === 'ar'
-                      ? 'بوابة الموثوقية والحماية لأفعال وكلاء الذكاء الاصطناعي'
-                      : 'Reliability & Action Control for Autonomous AI Agents'}
+                    Agent Reliability & Causal Continuity Platform
                   </h1>
                   <p className={`text-xs sm:text-sm leading-relaxed ${textMuted} mb-4`}>
-                    {lang === 'ar'
-                      ? 'يمنع CCK تنفيذ الإجراءات الخارجية عند تغير الحقائق (Fact Drift)، ويحظر الأوامر التدميرية، ويفرض التحقق قبل الكتابة، مع تسجيل كل قرار في سلسلة تدقيق مشفرة.'
-                      : 'CCK intercepts external AI agent mutations, validates fact preconditions against drift, blocks destructive payloads, and records tamper-evident SHA-256 audit logs.'}
+                    CCK guarantees that autonomous AI agents never execute irreversible external actions on stale,
+                    invalidated, or hallucinated facts. Every mutation is intercepted, grounded against real-world evidence,
+                    and permanently sealed in a tamper-evident SHA-256 audit ledger.
                   </p>
 
                   <div className="flex flex-wrap gap-2.5">
@@ -1129,7 +1089,7 @@ export default function App() {
                       onClick={() => setActiveSection('actiongate')}
                       className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs transition-all shadow-sm"
                     >
-                      {lang === 'ar' ? 'تجربة فحص الأفعال الحية' : 'Test Action Gate Live'}
+                      Test Action Gate Live
                     </button>
                     <button
                       onClick={() => setActiveSection('facts')}
@@ -1137,7 +1097,7 @@ export default function App() {
                         isDark ? 'bg-slate-800 border-slate-700 text-slate-200 hover:text-white' : 'bg-slate-100 border-slate-300 text-slate-800'
                       }`}
                     >
-                      {lang === 'ar' ? 'محاكاة إبطال حقيقة (Fact Drift)' : 'Simulate Fact Drift'}
+                      Simulate Fact Drift
                     </button>
                     <button
                       onClick={() => setActiveSection('scenarios')}
@@ -1145,7 +1105,7 @@ export default function App() {
                         isDark ? 'bg-slate-800 border-slate-700 text-slate-200 hover:text-white' : 'bg-slate-100 border-slate-300 text-slate-800'
                       }`}
                     >
-                      {lang === 'ar' ? 'تشغيل حزمة الاختبارات (cck test)' : 'Run Scenarios Suite'}
+                      Run Scenarios Suite
                     </button>
                   </div>
                 </div>
@@ -1155,7 +1115,7 @@ export default function App() {
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-xs ${textMuted}`}>{lang === 'ar' ? 'سجلات التدقيق' : 'Audit Logs'}</span>
+                    <span className={`text-xs ${textMuted}`}>Audit Ledger</span>
                     <Fingerprint className="w-4 h-4 text-cyan-400" />
                   </div>
                   <div className="text-2xl font-bold font-mono text-cyan-400">{systemStatus?.total_audits || audits.length}</div>
@@ -1166,58 +1126,52 @@ export default function App() {
 
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-xs ${textMuted}`}>{lang === 'ar' ? 'الحقائق الموثقة' : 'Active Facts'}</span>
+                    <span className={`text-xs ${textMuted}`}>Active Facts</span>
                     <Database className="w-4 h-4 text-emerald-400" />
                   </div>
                   <div className="text-2xl font-bold font-mono text-emerald-400">{facts.length}</div>
-                  <div className={`text-[11px] ${textMuted} mt-1`}>{lang === 'ar' ? 'مراقبة الحداثة والإبطال' : 'Grounded & Fresh'}</div>
+                  <div className={`text-[11px] ${textMuted} mt-1`}>Grounded & Monitored</div>
                 </div>
 
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-xs ${textMuted}`}>{lang === 'ar' ? 'شروط الاعتماد' : 'Dependencies'}</span>
+                    <span className={`text-xs ${textMuted}`}>Dependencies</span>
                     <GitBranch className="w-4 h-4 text-indigo-400" />
                   </div>
                   <div className="text-2xl font-bold font-mono text-indigo-400">{dependencies.length}</div>
-                  <div className={`text-[11px] ${textMuted} mt-1`}>{lang === 'ar' ? 'شروط تنفيذ الأفعال' : 'Preconditions Bound'}</div>
+                  <div className={`text-[11px] ${textMuted} mt-1`}>Preconditions Bound</div>
                 </div>
 
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-xs ${textMuted}`}>{lang === 'ar' ? 'بانتظار موافقة بشرية' : 'Pending Approvals'}</span>
+                    <span className={`text-xs ${textMuted}`}>Pending Approvals</span>
                     <CheckSquare className="w-4 h-4 text-amber-400" />
                   </div>
                   <div className={`text-2xl font-bold font-mono ${approvals.length > 0 ? 'text-amber-400' : 'text-slate-400'}`}>
                     {approvals.length}
                   </div>
-                  <div className={`text-[11px] ${textMuted} mt-1`}>{lang === 'ar' ? 'إجراءات تدميرية معلقة' : 'Human-in-the-Loop'}</div>
+                  <div className={`text-[11px] ${textMuted} mt-1`}>Human-in-the-Loop</div>
                 </div>
               </div>
 
               {/* Live Drift Defense Visualizer */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
                   <div>
-                    <h3 className="font-bold text-sm flex items-center space-x-2 rtl:space-x-reverse">
+                    <h3 className="font-bold text-sm flex items-center space-x-2">
                       <Shield className="w-4 h-4 text-cyan-400" />
-                      <span>{lang === 'ar' ? 'آلية الحماية من انحراف الحقائق (Fact Drift Prevention)' : 'Fact Drift Prevention Flow'}</span>
+                      <span>Causal Continuity & Fact Drift Prevention Flow</span>
                     </h3>
                     <p className={`text-xs ${textMuted} mt-0.5`}>
-                      {lang === 'ar'
-                        ? 'كيف يضمن CCK عدم تنفيذ شحنة بعد استرجاع المبلغ أو تعديل قاعدة بيانات بعد فوات الأوان:'
-                        : 'How CCK guarantees no courier parcel ships after an order refund:'}
+                      How CCK guarantees no external courier parcel ships when an order has been refunded:
                     </p>
                   </div>
                   <button
                     onClick={() => handleInvalidateFact('order:1099', 'status', 'refunded')}
                     disabled={invalidatingFact}
-                    className="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-semibold font-mono transition-colors"
+                    className="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-semibold font-mono transition-colors shrink-0"
                   >
-                    {invalidatingFact
-                      ? '...'
-                      : lang === 'ar'
-                      ? '⚡ محاكاة استرجاع المبلغ (Invalidate order:1099)'
-                      : '⚡ Invalidate order:1099 (refund)'}
+                    {invalidatingFact ? 'Processing...' : '⚡ Trigger Refund (Invalidate order:1099)'}
                   </button>
                 </div>
 
@@ -1225,33 +1179,25 @@ export default function App() {
                   <div className={`p-3 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
                     <div className="font-semibold text-cyan-400 mb-1">1. Fact Grounding</div>
                     <p className={textMuted}>
-                      {lang === 'ar'
-                        ? 'يسجل CCK الحقيقة order:1099.status = paid مع بصمة رقمية ورابط بالدليل.'
-                        : 'CCK records order:1099.status = paid with SHA-256 evidence link.'}
+                      CCK records order:1099.status = paid with SHA-256 evidence token and TTL observation timestamp.
                     </p>
                   </div>
                   <div className={`p-3 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
                     <div className="font-semibold text-amber-400 mb-1">2. Drift Detection</div>
                     <p className={textMuted}>
-                      {lang === 'ar'
-                        ? 'يصل إشعار من Stripe يفيد باسترجاع المبلغ (refunded). تصبح الحقيقة INVALIDATED فوراً.'
-                        : 'Webhook arrives stating order is refunded. Fact state becomes INVALIDATED immediately.'}
+                      External webhook reports refund. Fact state immediately transitions to INVALIDATED.
                     </p>
                   </div>
                   <div className={`p-3 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
                     <div className="font-semibold text-rose-400 mb-1">3. ActionGate Intercept</div>
                     <p className={textMuted}>
-                      {lang === 'ar'
-                        ? 'يحاول الوكيل تنفيذ logistics.ship. تكتشف البوابة تلف الحقيقة وتصدر قرار BLOCK.'
-                        : 'Agent attempts logistics.ship. Action Gate checks precondition, issues BLOCK verdict.'}
+                      Agent attempts logistics.ship. Action Gate checks precondition and issues BLOCK verdict.
                     </p>
                   </div>
                   <div className={`p-3 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
                     <div className="font-semibold text-emerald-400 mb-1">4. Zero External Mutation</div>
                     <p className={textMuted}>
-                      {lang === 'ar'
-                        ? 'لم يتم استدعاء الموصل الخارجي إطلاقاً (0 API calls)، وسُجل التدخل في سجل التدقيق.'
-                        : 'Zero calls reach the external carrier. Security intervention is cryptographically logged.'}
+                      Carrier API receives 0 calls. Security block is permanently sealed in the cryptographic audit ledger.
                     </p>
                   </div>
                 </div>
@@ -1260,27 +1206,27 @@ export default function App() {
               {/* Recent Audit Entries Table */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm flex items-center space-x-2 rtl:space-x-reverse">
+                  <h3 className="font-bold text-sm flex items-center space-x-2">
                     <Activity className="w-4 h-4 text-cyan-400" />
-                    <span>{lang === 'ar' ? 'آخر قرارات بوابة الأفعال' : 'Recent Action Gate Activity'}</span>
+                    <span>Recent Action Gate Activity</span>
                   </h3>
                   <button
                     onClick={() => setActiveSection('audit')}
                     className="text-xs text-cyan-400 hover:underline font-mono"
                   >
-                    {lang === 'ar' ? 'عرض السجل الكامل →' : 'View Full Ledger →'}
+                    View Full Ledger →
                   </button>
                 </div>
 
                 <div className="overflow-x-auto">
-                  <table className="w-full text-xs text-right rtl:text-right ltr:text-left">
+                  <table className="w-full text-xs text-left">
                     <thead>
                       <tr className={`border-b ${borderSubtle} ${textMuted} font-mono`}>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'القرار' : 'Verdict'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'معرف الفعل' : 'Action ID'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الوكيل' : 'Agent'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'درجة الخطورة' : 'Risk'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الوقت' : 'Timestamp'}</th>
+                        <th className="py-2 px-3">Verdict</th>
+                        <th className="py-2 px-3">Action ID</th>
+                        <th className="py-2 px-3">Agent</th>
+                        <th className="py-2 px-3">Risk</th>
+                        <th className="py-2 px-3">Timestamp</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800">
@@ -1332,44 +1278,41 @@ export default function App() {
           {activeSection === 'architecture' && (
             <div className="space-y-6 animate-in fade-in duration-200">
               <div className={`rounded-2xl border p-6 ${bgCard}`}>
-                <h2 className="text-xl font-bold mb-3 flex items-center space-x-2 rtl:space-x-reverse">
+                <h2 className="text-xl font-bold mb-3 flex items-center space-x-2">
                   <Layers className="w-5 h-5 text-cyan-400" />
-                  <span>{lang === 'ar' ? 'المشكلة: لماذا تفشل وكلاء الذكاء الاصطناعي في الإنتاج؟' : 'The Agent Execution Problem'}</span>
+                  <span>The Real Problem: Why Autonomous Agents Fail in Production</span>
                 </h2>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs leading-relaxed mt-4">
                   <div className={`p-4 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
-                    <div className="font-bold text-amber-400 mb-1.5 flex items-center space-x-1.5 rtl:space-x-reverse">
+                    <div className="font-bold text-amber-400 mb-1.5 flex items-center space-x-1.5">
                       <AlertTriangle className="w-4 h-4" />
-                      <span>{lang === 'ar' ? 'انحراف الحقائق (Fact Drift)' : 'Fact Drift & Stale Context'}</span>
+                      <span>Fact Drift & Stale Context</span>
                     </div>
                     <p className={textMuted}>
-                      {lang === 'ar'
-                        ? 'يقرأ الوكيل حالة الطلب كـ "مدفوع". وبعد دقائق يُلغى الطلب أو يسترجع العميل أمواله، لكن سياق الـ LLM يظل معتقداً بصحة القديم فيرسل الشحنة بالخطأ.'
-                        : 'The LLM reads an order as paid. Minutes later, the order is cancelled, but the LLM’s context window never updates, triggering erroneous shipments.'}
+                      An agent reads an inventory or order as available. Minutes later, conditions change externally,
+                      but the LLM context remains fixed, triggering incorrect shipments, stale payments, or invalid mutations.
                     </p>
                   </div>
 
                   <div className={`p-4 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
-                    <div className="font-bold text-rose-400 mb-1.5 flex items-center space-x-1.5 rtl:space-x-reverse">
+                    <div className="font-bold text-rose-400 mb-1.5 flex items-center space-x-1.5">
                       <ShieldAlert className="w-4 h-4" />
-                      <span>{lang === 'ar' ? 'هلوسة الأفعال التدميرية' : 'Destructive Mutations'}</span>
+                      <span>Destructive Mutations</span>
                     </div>
                     <p className={textMuted}>
-                      {lang === 'ar'
-                        ? 'توليد أوامر Bash تدميرية مثل rm -rf أو Drop Table دون فحص نصف قطر الضرر أو التحقق من البيئة المستهدفة.'
-                        : 'Autonomous agents can hallucinate irreversible terminal commands or DB drops without blast-radius guardrails or production checks.'}
+                      Autonomous agents can hallucinate irreversible terminal commands, table drops, or permission grants.
+                      CCK enforces hard policy guardrails before execution adapters ever touch real systems.
                     </p>
                   </div>
 
                   <div className={`p-4 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
-                    <div className="font-bold text-indigo-400 mb-1.5 flex items-center space-x-1.5 rtl:space-x-reverse">
+                    <div className="font-bold text-indigo-400 mb-1.5 flex items-center space-x-1.5">
                       <Lock className="w-4 h-4" />
-                      <span>{lang === 'ar' ? 'انعدام التدقيق الجنائي المشفر' : 'Lack of Cryptographic Audit'}</span>
+                      <span>Lack of Cryptographic Auditability</span>
                     </div>
                     <p className={textMuted}>
-                      {lang === 'ar'
-                        ? 'سجلات التطبيقات العادية قابلة للتعديل والحذف. لا يمكن إثبات ما إذا كان الخطأ صادراً من الوكيل أو بتدخل بشري دون سلسلة هاش غير قابلة للتزوير.'
-                        : 'Plain logs are editable. Enterprise compliance requires immutable SHA-256 hash chains connecting agent intentions to exact external side-effects.'}
+                      Standard application logs are mutable and unverified. Enterprise compliance requires
+                      tamper-evident SHA-256 hash chains connecting agent intentions to exact side effects.
                     </p>
                   </div>
                 </div>
@@ -1377,73 +1320,57 @@ export default function App() {
 
               {/* 7 Layers Breakdown */}
               <div className={`rounded-2xl border p-6 ${bgCard}`}>
-                <h3 className="text-lg font-bold mb-4 flex items-center space-x-2 rtl:space-x-reverse">
+                <h3 className="text-lg font-bold mb-4 flex items-center space-x-2">
                   <ShieldCheck className="w-5 h-5 text-emerald-400" />
-                  <span>{lang === 'ar' ? 'طبقات الحل: معمارية CCK السبع' : 'The 7 Architectural Layers of CCK'}</span>
+                  <span>The 7 Architectural Layers of CCK</span>
                 </h3>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                   {[
                     {
                       num: 'L1',
-                      titleAr: 'محرك الموثوقية والحقائق (Core Reliability)',
-                      titleEn: 'Core Reliability & Preconditions',
-                      descAr: 'سجلات الكيانات والحقائق وبصمات SHA-256 وبوابة ActionGate التي تعترض كل فعل.',
-                      descEn: 'Entity/Fact registries, evidence hashes, and ActionGate intercepting every mutation.',
+                      title: 'Core Reliability & Preconditions',
+                      desc: 'Entity and fact registries, cryptographic evidence hashing, freshness checks, and ActionGate enforcement.',
                     },
                     {
                       num: 'L2',
-                      titleAr: 'الموصلات والتنفيذ الآمن (Execution Connectors)',
-                      titleEn: 'Connectors & Execution Adapters',
-                      descAr: 'محولات تنفيذ تفصل الوكيل عن الأنظمة الحقيقية، تدعم الكتابة المشروطة (CAS) والتعويض التراجعي.',
-                      descEn: 'Execution adapters isolating agents from target systems, supporting CAS and compensation.',
+                      title: 'Execution Adapters & Connectors',
+                      desc: 'Isolating agent decisions from targets, supporting conditional writes (CAS) and transactional compensation.',
                     },
                     {
                       num: 'L3',
-                      titleAr: 'الحوكمة والسياسات (Control Plane)',
-                      titleEn: 'Control Plane & Governance',
-                      descAr: 'محرك السياسات (POL-SEC)، التحقق من الإصدارات، وعزل الصلاحيات ونصف قطر الضرر.',
-                      descEn: 'Policy engine (POL-SEC), rule versioning, RBAC, and blast-radius rate-limits.',
+                      title: 'Control Plane & Governance',
+                      desc: 'Policy engine (POL-SEC), rule versioning, RBAC/ABAC isolation, and blast-radius rate-limit reservations.',
                     },
                     {
                       num: 'L4',
-                      titleAr: 'سجل التدقيق والتعافي (Audit & Recovery)',
-                      titleEn: 'Audit, Observability & Recovery',
-                      descAr: 'سجل تدقيق مشفر بسلسلة الهاش SHA-256 غير قابلة للتعديل، مع آليات التراجع الآمن.',
-                      descEn: 'Cryptographic SHA-256 hash-chained ledger and safe rollback compensation engines.',
+                      title: 'Audit, Observability & Recovery',
+                      desc: 'Cryptographically linked SHA-256 hash ledger, automated blast-radius impact analysis, and safe compensation rollback.',
                     },
                     {
                       num: 'L5',
-                      titleAr: 'مختبر الاختبار وحقن الأخطاء (Testing Lab)',
-                      titleEn: 'Testing & Failure Injection Lab',
-                      descAr: 'محاكاة انقطاع الاتصال (Timeout Injection) ومحرك Replay المعزول دون إعادة كتابة.',
-                      descEn: 'Network timeout injection, idempotency recovery tests, and read-only event replays.',
+                      title: 'Testing & Failure Injection Lab',
+                      desc: 'Automated scenarios suite (cck test), network timeout injection, and non-destructive replay engine.',
                     },
                     {
                       num: 'L6',
-                      titleAr: 'منصة المطورين و MCP (Integrations)',
-                      titleEn: 'Developer Platform & MCP',
-                      descAr: 'دعم كامل لبروتوكول MCP وخادم Proxy، مع مكتبات SDK لـ Python و TypeScript و CLI.',
-                      descEn: 'Model Context Protocol server, SDKs for Python/TypeScript, and developer CLI.',
+                      title: 'Developer Platform & MCP',
+                      desc: 'Model Context Protocol (MCP) server, native Python and TypeScript SDKs, CLI, and real-time webhook dispatchers.',
                     },
                     {
                       num: 'L7',
-                      titleAr: 'سحابة CCK والتعددية (Multi-Tenancy)',
-                      titleEn: 'Multi-Tenancy & Enterprise Cloud',
-                      descAr: 'عزل بيانات العملاء والمستأجرين، دعم SQLite WAL محلي مع مسار انتقال إلى PostgreSQL.',
-                      descEn: 'Multi-tenant project isolation, SQLite WAL backend with PostgreSQL enterprise path.',
+                      title: 'Multi-Tenancy & Enterprise Cloud',
+                      desc: 'Tenant workspace boundaries, durable SQLite WAL storage with automated migration path to PostgreSQL.',
                     },
                   ].map((layer) => (
                     <div key={layer.num} className={`p-3.5 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
-                      <div className="flex items-center space-x-2 rtl:space-x-reverse mb-1">
+                      <div className="flex items-center space-x-2 mb-1">
                         <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
                           {layer.num}
                         </span>
-                        <span className="font-semibold">{lang === 'ar' ? layer.titleAr : layer.titleEn}</span>
+                        <span className="font-semibold">{layer.title}</span>
                       </div>
-                      <p className={`text-[11px] leading-relaxed ${textMuted}`}>
-                        {lang === 'ar' ? layer.descAr : layer.descEn}
-                      </p>
+                      <p className={`text-[11px] leading-relaxed ${textMuted}`}>{layer.desc}</p>
                     </div>
                   ))}
                 </div>
@@ -1458,20 +1385,20 @@ export default function App() {
             <div className="space-y-6 animate-in fade-in duration-200">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                  <h2 className="text-lg font-bold flex items-center space-x-2">
                     <Cloud className="w-5 h-5 text-cyan-400" />
-                    <span>{lang === 'ar' ? 'إدارة المشاريع والمستأجرين' : 'Projects & Tenancy'}</span>
+                    <span>Workspaces & Multi-Tenancy</span>
                   </h2>
                   <p className={`text-xs ${textMuted}`}>
-                    {lang === 'ar' ? 'فصل معزول للبيانات والسياسات ومفاتيح الربط' : 'Multi-tenant project boundaries and rate quotas'}
+                    Strict tenant boundaries, rate limits, and isolated policy sets
                   </p>
                 </div>
                 <button
                   onClick={() => setShowNewProjectModal(true)}
-                  className="px-3.5 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs flex items-center space-x-1.5 rtl:space-x-reverse shadow-xs"
+                  className="px-3.5 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs flex items-center space-x-1.5 shadow-xs"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>{lang === 'ar' ? 'مشروع جديد' : 'New Project'}</span>
+                  <span>New Workspace</span>
                 </button>
               </div>
 
@@ -1494,35 +1421,35 @@ export default function App() {
                           <span className="font-mono text-xs text-slate-400">{p.project_id}</span>
                           {isActive ? (
                             <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-bold">
-                              {lang === 'ar' ? 'نشط حالياً' : 'Active'}
+                              Active Workspace
                             </span>
                           ) : (
                             <button
                               onClick={() => setActiveProjectId(p.project_id)}
                               className="text-[11px] text-cyan-400 hover:underline font-medium"
                             >
-                              {lang === 'ar' ? 'تفعيل' : 'Activate'}
+                              Select
                             </button>
                           )}
                         </div>
                         <h3 className="font-bold text-sm mb-1">{p.name}</h3>
                         <p className={`text-xs ${textMuted} mb-3 leading-relaxed`}>
-                          {p.description || (lang === 'ar' ? 'مشروع حماية ومراقبة وكلاء' : 'Agent security environment')}
+                          {p.description || 'Agent security and reliability workspace'}
                         </p>
                       </div>
 
                       <div className={`pt-3 border-t ${borderSubtle} space-y-1.5 text-xs font-mono`}>
                         <div className="flex items-center justify-between">
-                          <span className={textMuted}>{lang === 'ar' ? 'المستأجر:' : 'Tenant:'}</span>
+                          <span className={textMuted}>Tenant ID:</span>
                           <span>{p.tenant_id}</span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className={textMuted}>{lang === 'ar' ? 'الحصة/الدقيقة:' : 'Quota/min:'}</span>
-                          <span className="text-emerald-400">{p.rate_limit_per_minute} req</span>
+                          <span className={textMuted}>Rate Quota:</span>
+                          <span className="text-emerald-400">{p.rate_limit_per_minute} req/min</span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className={textMuted}>{lang === 'ar' ? 'الموصلات:' : 'Connectors:'}</span>
-                          <span>{p.connectors.length}</span>
+                          <span className={textMuted}>Connectors:</span>
+                          <span>{p.connectors.length} active</span>
                         </div>
                       </div>
                     </div>
@@ -1535,7 +1462,7 @@ export default function App() {
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
                   <div className={`w-full max-w-md rounded-2xl border p-6 ${bgCard}`}>
                     <div className="flex items-center justify-between mb-4">
-                      <h3 className="font-bold text-base">{lang === 'ar' ? 'إنشاء مشروع جديد' : 'Create New Project'}</h3>
+                      <h3 className="font-bold text-base">Create New Workspace</h3>
                       <button onClick={() => setShowNewProjectModal(false)} className="text-slate-400 hover:text-white">
                         <X className="w-5 h-5" />
                       </button>
@@ -1543,7 +1470,7 @@ export default function App() {
 
                     <form onSubmit={handleCreateProject} className="space-y-4 text-xs">
                       <div>
-                        <label className="block font-medium mb-1">{lang === 'ar' ? 'اسم المشروع' : 'Project Name'}</label>
+                        <label className="block font-medium mb-1">Workspace Name</label>
                         <input
                           type="text"
                           required
@@ -1557,19 +1484,19 @@ export default function App() {
                       </div>
 
                       <div>
-                        <label className="block font-medium mb-1">{lang === 'ar' ? 'الوصف' : 'Description'}</label>
+                        <label className="block font-medium mb-1">Description</label>
                         <textarea
                           rows={2}
                           value={newProjectDesc}
                           onChange={(e) => setNewProjectDesc(e.target.value)}
-                          placeholder="Production guardrails and drift inspection for payments bot"
+                          placeholder="Production guardrails and drift inspection for agents"
                           className={`w-full px-3 py-2 rounded-xl border ${
                             isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'
                           }`}
                         />
                       </div>
 
-                      <div className="flex justify-end space-x-2 rtl:space-x-reverse pt-2">
+                      <div className="flex justify-end space-x-2 pt-2">
                         <button
                           type="button"
                           onClick={() => setShowNewProjectModal(false)}
@@ -1577,13 +1504,13 @@ export default function App() {
                             isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'
                           }`}
                         >
-                          {lang === 'ar' ? 'إلغاء' : 'Cancel'}
+                          Cancel
                         </button>
                         <button
                           type="submit"
                           className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold"
                         >
-                          {lang === 'ar' ? 'حفظ المشروع' : 'Create Project'}
+                          Create Workspace
                         </button>
                       </div>
                     </form>
@@ -1600,14 +1527,12 @@ export default function App() {
             <div className="space-y-6 animate-in fade-in duration-200">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                  <h2 className="text-lg font-bold flex items-center space-x-2">
                     <Key className="w-5 h-5 text-cyan-400" />
-                    <span>{lang === 'ar' ? 'مفاتيح الربط والتوثيق (API Keys)' : 'API Keys & Authentication'}</span>
+                    <span>API Keys & Credentials</span>
                   </h2>
                   <p className={`text-xs ${textMuted}`}>
-                    {lang === 'ar'
-                      ? `المفاتيح النشطة لمشروع: ${activeProjectId} (تخزين مشفر بـ SHA-256)`
-                      : `Active keys for ${activeProjectId} (Stored as SHA-256 digests)`}
+                    Active keys for workspace: {activeProjectId} (Stored exclusively as SHA-256 hashes)
                   </p>
                 </div>
               </div>
@@ -1615,7 +1540,7 @@ export default function App() {
               {/* Issue Key Form */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
                 <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3 font-mono">
-                  {lang === 'ar' ? 'إصدار مفتاح جديد للوكيل أو الخدمة' : 'Issue New Agent Access Key'}
+                  Issue New Agent Access Key
                 </h3>
                 <form onSubmit={handleCreateApiKey} className="flex flex-col sm:flex-row gap-3">
                   <input
@@ -1630,21 +1555,21 @@ export default function App() {
                   />
                   <button
                     type="submit"
-                    className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs flex items-center justify-center space-x-1.5 rtl:space-x-reverse shrink-0"
+                    className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs flex items-center justify-center space-x-1.5 shrink-0"
                   >
                     <Plus className="w-4 h-4" />
-                    <span>{lang === 'ar' ? 'إصدار المفتاح' : 'Generate Key'}</span>
+                    <span>Generate Key</span>
                   </button>
                 </form>
               </div>
 
-              {/* Newly Created Secret Modal / Alert */}
+              {/* Newly Created Secret Alert */}
               {newlyCreatedKey && newlyCreatedKey.token && (
                 <div className="p-4 rounded-xl border bg-emerald-950/70 border-emerald-700/80 text-emerald-200 text-xs space-y-2">
                   <div className="flex items-center justify-between font-bold">
-                    <span className="flex items-center space-x-1.5 rtl:space-x-reverse">
+                    <span className="flex items-center space-x-1.5">
                       <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                      <span>{lang === 'ar' ? 'تم إنشاء المفتاح بنجاح! انسخه الآن فوراً:' : 'Key Issued! Copy it immediately:'}</span>
+                      <span>Key Issued Successfully! Copy it now:</span>
                     </span>
                     <button onClick={() => setNewlyCreatedKey(null)} className="text-emerald-400 hover:text-white">
                       <X className="w-4 h-4" />
@@ -1654,37 +1579,34 @@ export default function App() {
                     <span className="truncate mr-2">{newlyCreatedKey.token}</span>
                     <button
                       onClick={() => copyText(newlyCreatedKey.token || '', 'new-key')}
-                      className="p-1.5 rounded bg-emerald-800/80 hover:bg-emerald-700 text-white shrink-0 flex items-center space-x-1 rtl:space-x-reverse"
+                      className="p-1.5 rounded bg-emerald-800/80 hover:bg-emerald-700 text-white shrink-0 flex items-center space-x-1"
                     >
                       {copiedId === 'new-key' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span className="text-[10px]">{lang === 'ar' ? 'نسخ' : 'Copy'}</span>
+                      <span className="text-[10px]">Copy</span>
                     </button>
                   </div>
                   <p className="text-[11px] text-emerald-300/80">
-                    {lang === 'ar'
-                      ? 'ملاحظة أمنية: لن يتم عرض هذا المفتاح بصيغته النصية مرة أخرى، ويتم تخزينه فقط كبصمة SHA-256 في قاعدة البيانات.'
-                      : 'Security note: This plaintext secret will never be shown again. Only its SHA-256 hash is kept in storage.'}
+                    Security notice: Plaintext tokens are never stored and cannot be retrieved again.
+                    Only the SHA-256 digest is kept in the database.
                   </p>
                 </div>
               )}
 
               {/* Existing Keys Table */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
-                <h3 className="font-bold text-sm mb-3">
-                  {lang === 'ar' ? 'المفاتيح النشطة للمشروع' : 'Active Keys for Current Project'}
-                </h3>
+                <h3 className="font-bold text-sm mb-3">Active Workspace Keys</h3>
                 {apiKeys.length === 0 ? (
-                  <p className={`text-xs ${textMuted}`}>{lang === 'ar' ? 'لا توجد مفاتيح صادرة لهذا المشروع بعد.' : 'No keys issued yet.'}</p>
+                  <p className={`text-xs ${textMuted}`}>No active API keys found for this workspace.</p>
                 ) : (
                   <div className="overflow-x-auto">
-                    <table className="w-full text-xs text-right rtl:text-right ltr:text-left">
+                    <table className="w-full text-xs text-left">
                       <thead>
                         <tr className={`border-b ${borderSubtle} ${textMuted} font-mono`}>
-                          <th className="py-2 px-3">{lang === 'ar' ? 'الاسم' : 'Name'}</th>
-                          <th className="py-2 px-3">{lang === 'ar' ? 'البادئة' : 'Prefix'}</th>
-                          <th className="py-2 px-3">{lang === 'ar' ? 'الحالة' : 'Status'}</th>
-                          <th className="py-2 px-3">{lang === 'ar' ? 'تاريخ الإنشاء' : 'Created At'}</th>
-                          <th className="py-2 px-3 text-center">{lang === 'ar' ? 'إجراء' : 'Action'}</th>
+                          <th className="py-2 px-3">Name</th>
+                          <th className="py-2 px-3">Prefix</th>
+                          <th className="py-2 px-3">Status</th>
+                          <th className="py-2 px-3">Created At</th>
+                          <th className="py-2 px-3 text-center">Action</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800 font-mono">
@@ -1712,7 +1634,7 @@ export default function App() {
                                   onClick={() => handleRevokeApiKey(k.key_id)}
                                   className="text-rose-400 hover:text-rose-300 text-xs font-sans hover:underline"
                                 >
-                                  {lang === 'ar' ? 'إبطال' : 'Revoke'}
+                                  Revoke
                                 </button>
                               )}
                             </td>
@@ -1732,21 +1654,19 @@ export default function App() {
           {activeSection === 'integrations' && (
             <div className="space-y-6 animate-in fade-in duration-200">
               <div>
-                <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                <h2 className="text-lg font-bold flex items-center space-x-2">
                   <Terminal className="w-5 h-5 text-cyan-400" />
-                  <span>{lang === 'ar' ? 'بوابة التكاملات وخادم MCP' : 'Integrations & MCP Gateway'}</span>
+                  <span>Integrations & Model Context Protocol (MCP) Hub</span>
                 </h2>
                 <p className={`text-xs ${textMuted}`}>
-                  {lang === 'ar'
-                    ? 'ربط وكلاء الذكاء الاصطناعي عبر بروتوكول Model Context Protocol وواجهات REST ومكتبات SDK'
-                    : 'Connect agents via Model Context Protocol (stdio/docker), REST API, and native SDKs'}
+                  Connect AI agents via native MCP server (stdio/docker), REST API endpoints, and SDK clients
                 </p>
               </div>
 
               {/* MCP Protocol Server Card */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
                 <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center space-x-2 rtl:space-x-reverse">
+                  <div className="flex items-center space-x-2">
                     <span className="w-7 h-7 rounded-lg bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-xs font-mono font-bold text-indigo-400">
                       MCP
                     </span>
@@ -1756,14 +1676,14 @@ export default function App() {
                     </div>
                   </div>
                   <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                    Compliant & Ready
+                    Compliant & Verified
                   </span>
                 </div>
 
                 <div className="space-y-3 text-xs">
                   <div>
                     <label className="block text-[11px] font-mono text-slate-400 mb-1">
-                      {lang === 'ar' ? 'أمر التشغيل المباشر (StdIO):' : 'Direct StdIO Launch Command:'}
+                      Direct StdIO Launch Command:
                     </label>
                     <div className="p-2.5 rounded-xl bg-slate-950 font-mono text-cyan-300 flex items-center justify-between border border-slate-800">
                       <code>cck mcp</code>
@@ -1778,7 +1698,7 @@ export default function App() {
 
                   <div>
                     <label className="block text-[11px] font-mono text-slate-400 mb-1">
-                      {lang === 'ar' ? 'أمر التشغيل عبر حاوية Docker:' : 'Docker Container Launch Command:'}
+                      Docker Container Launch Command:
                     </label>
                     <div className="p-2.5 rounded-xl bg-slate-950 font-mono text-cyan-300 flex items-center justify-between border border-slate-800">
                       <code>docker run -i --rm cck:latest cck mcp</code>
@@ -1793,7 +1713,7 @@ export default function App() {
 
                   {/* Exposed Tools */}
                   <div>
-                    <div className="font-semibold mb-1 text-slate-300">{lang === 'ar' ? 'الأدوات المكشوفة للـ LLM عبر MCP:' : 'Exposed Tools via MCP:'}</div>
+                    <div className="font-semibold mb-1 text-slate-300">Exposed Tools via MCP:</div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono">
                       {(mcpConfig?.exposed_tools || [
                         { name: 'cck_evaluate_action', description: 'Zero-Bypass Action Gate evaluation before execution' },
@@ -1816,9 +1736,9 @@ export default function App() {
                 {/* Python SDK */}
                 <div className={`rounded-2xl border p-5 ${bgCard}`}>
                   <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center space-x-2 rtl:space-x-reverse font-mono text-xs font-bold text-emerald-400">
+                    <div className="flex items-center space-x-2 font-mono text-xs font-bold text-emerald-400">
                       <Code className="w-4 h-4" />
-                      <span>Python SDK Usage</span>
+                      <span>Python SDK Client</span>
                     </div>
                     <button
                       onClick={() =>
@@ -1851,9 +1771,9 @@ else:
                 {/* TypeScript SDK */}
                 <div className={`rounded-2xl border p-5 ${bgCard}`}>
                   <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center space-x-2 rtl:space-x-reverse font-mono text-xs font-bold text-cyan-400">
+                    <div className="flex items-center space-x-2 font-mono text-xs font-bold text-cyan-400">
                       <Code className="w-4 h-4" />
-                      <span>TypeScript SDK Usage</span>
+                      <span>TypeScript SDK Client</span>
                     </div>
                     <button
                       onClick={() =>
@@ -1892,45 +1812,41 @@ if (verdict.decision === 'ALLOW') {
             <div className="space-y-6 animate-in fade-in duration-200">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                  <h2 className="text-lg font-bold flex items-center space-x-2">
                     <Database className="w-5 h-5 text-emerald-400" />
-                    <span>{lang === 'ar' ? 'سجل الحقائق والأدلة المسكوكة' : 'Facts & Evidence Registry'}</span>
+                    <span>Facts & Evidence Registry</span>
                   </h2>
                   <p className={`text-xs ${textMuted}`}>
-                    {lang === 'ar'
-                      ? 'الحقائق المستندة لأدلة موثوقة والتي تعتمد عليها أفعال الوكلاء الحساسة'
-                      : 'Grounded facts with cryptographic evidence hashes governing agent mutations'}
+                    Grounded facts and cryptographic evidence hashes governing agent execution preconditions
                   </p>
                 </div>
                 <button
                   onClick={() => setShowAddFactModal(true)}
-                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center space-x-1.5 rtl:space-x-reverse shadow-xs"
+                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center space-x-1.5 shadow-xs"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>{lang === 'ar' ? 'تسجيل حقيقة' : 'Add Fact'}</span>
+                  <span>Record Fact</span>
                 </button>
               </div>
 
               {/* Facts Table */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="font-bold text-sm">
-                    {lang === 'ar' ? 'الحقائق المسجلة في المحرك' : 'Tracked Facts in Reliability Engine'}
-                  </h3>
-                  <span className="text-xs text-slate-400 font-mono">{facts.length} facts</span>
+                  <h3 className="font-bold text-sm">Grounded World Facts</h3>
+                  <span className="text-xs text-slate-400 font-mono">{facts.length} tracked facts</span>
                 </div>
 
                 <div className="overflow-x-auto">
-                  <table className="w-full text-xs text-right rtl:text-right ltr:text-left">
+                  <table className="w-full text-xs text-left">
                     <thead>
                       <tr className={`border-b ${borderSubtle} ${textMuted} font-mono`}>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الكيان' : 'Entity'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الحقل' : 'Field'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'القيمة الحالية' : 'Value'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الحالة' : 'State'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الإصدار' : 'Version'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'المصدر' : 'Source'}</th>
-                        <th className="py-2 px-3 text-center">{lang === 'ar' ? 'محاكاة الإبطال' : 'Simulate Drift'}</th>
+                        <th className="py-2 px-3">Entity</th>
+                        <th className="py-2 px-3">Field</th>
+                        <th className="py-2 px-3">Current Value</th>
+                        <th className="py-2 px-3">State</th>
+                        <th className="py-2 px-3">Version</th>
+                        <th className="py-2 px-3">Source</th>
+                        <th className="py-2 px-3 text-center">Drift Simulator</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800 font-mono">
@@ -1958,14 +1874,14 @@ if (verdict.decision === 'ALLOW') {
                                 onClick={() => handleInvalidateFact(f.entity_id, f.field_name, 'refunded')}
                                 className="px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-sans font-semibold transition-colors"
                               >
-                                {lang === 'ar' ? 'إبطال (refunded)' : 'Invalidate'}
+                                Invalidate (refunded)
                               </button>
                             ) : (
                               <button
                                 onClick={() => handleInvalidateFact(f.entity_id, f.field_name, 'paid')}
                                 className="px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[10px] font-sans font-semibold transition-colors"
                               >
-                                {lang === 'ar' ? 'استعادة (paid)' : 'Restore'}
+                                Restore (paid)
                               </button>
                             )}
                           </td>
@@ -1978,20 +1894,18 @@ if (verdict.decision === 'ALLOW') {
 
               {/* Evidence Registry */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
-                <h3 className="font-bold text-sm mb-3">
-                  {lang === 'ar' ? 'سجل الأدلة المسكوكة (Evidence Mint)' : 'Minted Evidence Tokens'}
-                </h3>
+                <h3 className="font-bold text-sm mb-3">Minted Cryptographic Evidence Tokens</h3>
                 <div className="space-y-2">
                   {evidenceList.map((e) => (
                     <div key={e.evidence_id} className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between text-xs font-mono ${bgSubtle} ${borderSubtle}`}>
                       <div className="space-y-0.5 mb-2 sm:mb-0">
-                        <div className="flex items-center space-x-2 rtl:space-x-reverse">
+                        <div className="flex items-center space-x-2">
                           <span className="font-bold text-cyan-400">{e.evidence_id}</span>
                           <span className="text-slate-400">({e.entity_id}.{e.field_name})</span>
                         </div>
-                        <div className={`text-[10px] font-sans ${textMuted}`}>Source: {e.source} • Time: {new Date(e.observed_at).toLocaleString()}</div>
+                        <div className={`text-[10px] font-sans ${textMuted}`}>Source: {e.source} • Recorded: {new Date(e.observed_at).toLocaleString()}</div>
                       </div>
-                      <div className="flex items-center space-x-2 rtl:space-x-reverse">
+                      <div className="flex items-center space-x-2">
                         <span className="text-[10px] text-slate-400 truncate max-w-[200px]" title={e.payload_hash}>
                           SHA-256: {e.payload_hash.slice(0, 16)}...
                         </span>
@@ -2012,7 +1926,7 @@ if (verdict.decision === 'ALLOW') {
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
                   <div className={`w-full max-w-md rounded-2xl border p-6 ${bgCard}`}>
                     <div className="flex items-center justify-between mb-4">
-                      <h3 className="font-bold text-base">{lang === 'ar' ? 'تسجيل حقيقة جديدة' : 'Record New Fact'}</h3>
+                      <h3 className="font-bold text-base">Record New Grounded Fact</h3>
                       <button onClick={() => setShowAddFactModal(false)} className="text-slate-400 hover:text-white">
                         <X className="w-5 h-5" />
                       </button>
@@ -2059,7 +1973,7 @@ if (verdict.decision === 'ALLOW') {
                         />
                       </div>
 
-                      <div className="flex justify-end space-x-2 rtl:space-x-reverse pt-2">
+                      <div className="flex justify-end space-x-2 pt-2">
                         <button
                           type="button"
                           onClick={() => setShowAddFactModal(false)}
@@ -2090,34 +2004,32 @@ if (verdict.decision === 'ALLOW') {
             <div className="space-y-6 animate-in fade-in duration-200">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                  <h2 className="text-lg font-bold flex items-center space-x-2">
                     <GitBranch className="w-5 h-5 text-indigo-400" />
-                    <span>{lang === 'ar' ? 'شبكة الاعتمادات وشروط الأفعال' : 'Action Dependency Preconditions'}</span>
+                    <span>Dependency Preconditions Graph</span>
                   </h2>
                   <p className={`text-xs ${textMuted}`}>
-                    {lang === 'ar'
-                      ? 'ربط كل فعل خارجي بحقائق مسبقة لا يجوز التنفيذ بدون صحتها وحداثتها'
-                      : 'Binding external mutations to fact validity preconditions'}
+                    Enforcing that actions execute ONLY when fact validity preconditions are verified
                   </p>
                 </div>
                 <button
                   onClick={() => setShowAddDepModal(true)}
-                  className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center space-x-1.5 rtl:space-x-reverse shadow-xs"
+                  className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center space-x-1.5 shadow-xs"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>{lang === 'ar' ? 'إضافة شرط اعتماد' : 'Bind Dependency'}</span>
+                  <span>Bind Dependency</span>
                 </button>
               </div>
 
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
                 <div className="overflow-x-auto">
-                  <table className="w-full text-xs text-right rtl:text-right ltr:text-left">
+                  <table className="w-full text-xs text-left">
                     <thead>
                       <tr className={`border-b ${borderSubtle} ${textMuted} font-mono`}>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الفعل المستهدف' : 'Action Capability'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الحقيقة الإلزامية' : 'Required Fact'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'أقصى عمر (ثانية)' : 'Max Age (TTL)'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'حالة الحقيقة الحالية' : 'Current State'}</th>
+                        <th className="py-2 px-3">Target Capability</th>
+                        <th className="py-2 px-3">Required Fact Precondition</th>
+                        <th className="py-2 px-3">Max TTL</th>
+                        <th className="py-2 px-3">Precondition Status</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800 font-mono">
@@ -2141,7 +2053,7 @@ if (verdict.decision === 'ALLOW') {
                                     : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
                                 }`}
                               >
-                                {isSatisfied ? 'VALID (Action Allowed)' : 'BLOCKED (Precondition Drift)'}
+                                {isSatisfied ? 'VALID (Action Permitted)' : 'BLOCKED (Precondition Drift)'}
                               </span>
                             </td>
                           </tr>
@@ -2157,7 +2069,7 @@ if (verdict.decision === 'ALLOW') {
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
                   <div className={`w-full max-w-md rounded-2xl border p-6 ${bgCard}`}>
                     <div className="flex items-center justify-between mb-4">
-                      <h3 className="font-bold text-base">{lang === 'ar' ? 'ربط شرط اعتماد جديد' : 'Bind Dependency'}</h3>
+                      <h3 className="font-bold text-base">Bind Dependency Precondition</h3>
                       <button onClick={() => setShowAddDepModal(false)} className="text-slate-400 hover:text-white">
                         <X className="w-5 h-5" />
                       </button>
@@ -2204,7 +2116,7 @@ if (verdict.decision === 'ALLOW') {
                         />
                       </div>
 
-                      <div className="flex justify-end space-x-2 rtl:space-x-reverse pt-2">
+                      <div className="flex justify-end space-x-2 pt-2">
                         <button
                           type="button"
                           onClick={() => setShowAddDepModal(false)}
@@ -2234,14 +2146,12 @@ if (verdict.decision === 'ALLOW') {
           {activeSection === 'actiongate' && (
             <div className="space-y-6 animate-in fade-in duration-200">
               <div>
-                <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                <h2 className="text-lg font-bold flex items-center space-x-2">
                   <ShieldCheck className="w-5 h-5 text-cyan-400" />
-                  <span>{lang === 'ar' ? 'بوابة فحص الأفعال الحية (Action Gate)' : 'Live Action Gate Console'}</span>
+                  <span>Live Action Gate Console</span>
                 </h2>
                 <p className={`text-xs ${textMuted}`}>
-                  {lang === 'ar'
-                    ? 'اختبر فحص وتقييم أي فعل أو أمر خارجي قبل تنفيذه للتأكد من انطباق شروط الموثوقية والأمان'
-                    : 'Evaluate external mutations against security policies and fact preconditions'}
+                  Evaluate external mutations before execution against active policies, blast-radius, and drift rules
                 </p>
               </div>
 
@@ -2301,7 +2211,7 @@ if (verdict.decision === 'ALLOW') {
 
                 {/* Quick Presets */}
                 <div className="flex flex-wrap gap-2 mb-4 text-[11px]">
-                  <span className={`self-center ${textMuted}`}>{lang === 'ar' ? 'نماذج جاهزة:' : 'Presets:'}</span>
+                  <span className={`self-center ${textMuted}`}>Test Presets:</span>
                   <button
                     onClick={() => {
                       setGateCapability('logistics.ship');
@@ -2344,7 +2254,7 @@ if (verdict.decision === 'ALLOW') {
                 </div>
 
                 <div className="flex items-center justify-between pt-2">
-                  <label className="flex items-center space-x-2 rtl:space-x-reverse text-xs cursor-pointer select-none">
+                  <label className="flex items-center space-x-2 text-xs cursor-pointer select-none">
                     <input
                       type="checkbox"
                       checked={shadowMode}
@@ -2352,17 +2262,17 @@ if (verdict.decision === 'ALLOW') {
                       className="rounded text-cyan-500 focus:ring-0"
                     />
                     <span className={textMuted}>
-                      {lang === 'ar' ? 'وضع المراقبة الظلية (Shadow Mode)' : 'Shadow Mode (Observe only, no actual block)'}
+                      Observe Mode (Simulate decision without blocking execution)
                     </span>
                   </label>
 
                   <button
                     onClick={handleEvaluateAction}
                     disabled={evaluatingGate}
-                    className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center space-x-1.5 rtl:space-x-reverse shadow-md shadow-cyan-500/20"
+                    className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center space-x-1.5 shadow-md shadow-cyan-500/20"
                   >
                     <Play className="w-4 h-4 fill-slate-950" />
-                    <span>{evaluatingGate ? '...' : lang === 'ar' ? 'فحص الفعل الآن' : 'Evaluate Action'}</span>
+                    <span>{evaluatingGate ? 'Evaluating...' : 'Evaluate Action'}</span>
                   </button>
                 </div>
               </div>
@@ -2379,7 +2289,7 @@ if (verdict.decision === 'ALLOW') {
                   }`}
                 >
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-                    <div className="flex items-center space-x-2.5 rtl:space-x-reverse">
+                    <div className="flex items-center space-x-2.5">
                       <span
                         className={`px-3 py-1 rounded-lg text-xs font-mono font-bold tracking-wider ${
                           gateResult.decision === 'ALLOW'
@@ -2394,12 +2304,12 @@ if (verdict.decision === 'ALLOW') {
                       <span className="font-mono text-xs opacity-80">Matched: {gateResult.rule}</span>
                       {gateResult.shadowActive && (
                         <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                          SHADOW OBSERVED
+                          OBSERVE MODE ACTIVE
                         </span>
                       )}
                     </div>
 
-                    <div className="flex items-center space-x-2 rtl:space-x-reverse font-mono text-xs">
+                    <div className="flex items-center space-x-2 font-mono text-xs">
                       <span>Risk Score:</span>
                       <span className="font-bold">{gateResult.riskScore.toFixed(2)} / 1.0</span>
                     </div>
@@ -2423,23 +2333,21 @@ if (verdict.decision === 'ALLOW') {
           {activeSection === 'approvals' && (
             <div className="space-y-6 animate-in fade-in duration-200">
               <div>
-                <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                <h2 className="text-lg font-bold flex items-center space-x-2">
                   <CheckSquare className="w-5 h-5 text-amber-400" />
-                  <span>{lang === 'ar' ? 'طابور الموافقات البشرية (Human-in-the-Loop)' : 'Human Approval Queue'}</span>
+                  <span>Human Approval Queue</span>
                 </h2>
                 <p className={`text-xs ${textMuted}`}>
-                  {lang === 'ar'
-                    ? 'الأفعال الحساسة أو التدميرية المعلقة التي تتطلب توقيع مشرف أمني بشري'
-                    : 'Pending high-risk mutations awaiting authorized supervisor review'}
+                  High-risk or system-mutating operations awaiting authorized supervisor signature
                 </p>
               </div>
 
               {approvals.length === 0 ? (
                 <div className={`p-8 rounded-2xl border text-center ${bgCard}`}>
                   <CheckCircle2 className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
-                  <p className="font-semibold text-sm mb-1">{lang === 'ar' ? 'الطابور فارغ تماماً' : 'No Pending Approvals'}</p>
+                  <p className="font-semibold text-sm mb-1">Queue Empty</p>
                   <p className={`text-xs ${textMuted}`}>
-                    {lang === 'ar' ? 'كافة الإجراءات مصادق عليها ولا توجد طلبات معلقة.' : 'All high-risk actions have been resolved.'}
+                    No pending approval requests. All mutations have been verified and processed.
                   </p>
                 </div>
               ) : (
@@ -2447,7 +2355,7 @@ if (verdict.decision === 'ALLOW') {
                   {approvals.map((req) => (
                     <div key={req.approval_id} className={`rounded-2xl border p-5 ${bgCard}`}>
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-                        <div className="flex items-center space-x-2 rtl:space-x-reverse font-mono text-xs">
+                        <div className="flex items-center space-x-2 font-mono text-xs">
                           <span className="font-bold text-amber-400">{req.approval_id}</span>
                           <span className="text-slate-400">Agent: {req.agent_id}</span>
                         </div>
@@ -2462,18 +2370,18 @@ if (verdict.decision === 'ALLOW') {
 
                       <p className={`text-xs ${textMuted} mb-4 leading-relaxed`}>{req.reason}</p>
 
-                      <div className="flex items-center justify-end space-x-2 rtl:space-x-reverse">
+                      <div className="flex items-center justify-end space-x-2">
                         <button
                           onClick={() => handleResolveApproval(req.approval_id, false)}
                           className="px-4 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-semibold transition-colors"
                         >
-                          {lang === 'ar' ? 'رفض الفعل' : 'Reject Action'}
+                          Reject Mutation
                         </button>
                         <button
                           onClick={() => handleResolveApproval(req.approval_id, true)}
                           className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors shadow-xs"
                         >
-                          {lang === 'ar' ? 'الموافقة والتوقيع المشفر' : 'Approve & Sign'}
+                          Sign & Approve
                         </button>
                       </div>
                     </div>
@@ -2490,23 +2398,21 @@ if (verdict.decision === 'ALLOW') {
             <div className="space-y-6 animate-in fade-in duration-200">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                  <h2 className="text-lg font-bold flex items-center space-x-2">
                     <Fingerprint className="w-5 h-5 text-indigo-400" />
-                    <span>{lang === 'ar' ? 'سجل التدقيق المشفر (Cryptographic Chain)' : 'Audit Ledger & Hash Chain'}</span>
+                    <span>Cryptographic Audit Ledger</span>
                   </h2>
                   <p className={`text-xs ${textMuted}`}>
-                    {lang === 'ar'
-                      ? 'سلسلة أحداث مترابطة رياضياً بـ SHA-256 تمنع التلاعب أو حذف السجلات بأثر رجعي'
-                      : 'Immutable SHA-256 hash-chained ledger preventing retroactive tampering'}
+                    Immutable SHA-256 hash-chained ledger preventing retroactive tampering or log manipulation
                   </p>
                 </div>
                 <button
                   onClick={handleVerifyChain}
                   disabled={verifyingChain}
-                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center space-x-1.5 rtl:space-x-reverse shadow-xs shrink-0"
+                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center space-x-1.5 shadow-xs shrink-0"
                 >
                   <Fingerprint className="w-4 h-4" />
-                  <span>{verifyingChain ? '...' : lang === 'ar' ? 'فحص سلامة السلسلة' : 'Verify Chain Integrity'}</span>
+                  <span>{verifyingChain ? 'Verifying...' : 'Verify Chain Integrity'}</span>
                 </button>
               </div>
 
@@ -2519,7 +2425,7 @@ if (verdict.decision === 'ALLOW') {
                       : 'bg-rose-950/70 border-rose-700 text-rose-200'
                   }`}
                 >
-                  <div className="flex items-center space-x-2 rtl:space-x-reverse">
+                  <div className="flex items-center space-x-2">
                     {chainVerify.verified ? (
                       <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
                     ) : (
@@ -2528,9 +2434,7 @@ if (verdict.decision === 'ALLOW') {
                     <div>
                       <div className="font-bold">
                         {chainVerify.verified
-                          ? lang === 'ar'
-                            ? `✓ سلسلة الهاش المشفرة سليمة بنسبة 100% (${chainVerify.total_records} سجلاً)`
-                            : `✓ Cryptographic hash chain fully verified (${chainVerify.total_records} records)`
+                          ? `✓ Cryptographic hash chain fully verified (${chainVerify.total_records} records)`
                           : 'Tampering detected in audit records!'}
                       </div>
                       <div className="text-[10px] opacity-80">Latest Hash: {chainVerify.latest_hash}</div>
@@ -2545,14 +2449,14 @@ if (verdict.decision === 'ALLOW') {
               {/* Audit Table */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
                 <div className="overflow-x-auto">
-                  <table className="w-full text-xs text-right rtl:text-right ltr:text-left">
+                  <table className="w-full text-xs text-left">
                     <thead>
                       <tr className={`border-b ${borderSubtle} ${textMuted} font-mono`}>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'القرار' : 'Verdict'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'هاش الفعل (SHA-256)' : 'Action Hash'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الهاش السابق' : 'Previous Hash'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الحالة' : 'Status'}</th>
-                        <th className="py-2 px-3">{lang === 'ar' ? 'الوقت' : 'Time'}</th>
+                        <th className="py-2 px-3">Verdict</th>
+                        <th className="py-2 px-3">Action Hash (SHA-256)</th>
+                        <th className="py-2 px-3">Previous Hash</th>
+                        <th className="py-2 px-3">Execution Status</th>
+                        <th className="py-2 px-3">Timestamp</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800 font-mono">
@@ -2597,34 +2501,32 @@ if (verdict.decision === 'ALLOW') {
             <div className="space-y-6 animate-in fade-in duration-200">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                  <h2 className="text-lg font-bold flex items-center space-x-2">
                     <Play className="w-5 h-5 text-cyan-400" />
-                    <span>{lang === 'ar' ? 'مختبر السيناريوهات والأمر cck test' : 'Scenarios Testing Lab'}</span>
+                    <span>Scenarios Testing Lab (cck test)</span>
                   </h2>
                   <p className={`text-xs ${textMuted}`}>
-                    {lang === 'ar'
-                      ? 'تشغيل حزم الاختبار والتحقق من سيناريوهات الانحراف وحقن الأعطال عبر ScenarioRunner الحقيقي'
-                      : 'Live execution of fault injection, fact drift, and destructive attack test suites'}
+                    Live execution of fault injection, fact drift, network disconnect, and destructive attack scenarios
                   </p>
                 </div>
                 <button
                   onClick={handleRunAllScenarios}
                   disabled={runningScenarios}
-                  className="px-4 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center space-x-1.5 rtl:space-x-reverse shadow-md shadow-cyan-500/20 shrink-0"
+                  className="px-4 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center space-x-1.5 shadow-md shadow-cyan-500/20 shrink-0"
                 >
                   <Play className="w-4 h-4 fill-slate-950" />
-                  <span>{runningScenarios ? 'Running...' : lang === 'ar' ? 'تشغيل كافة السيناريوهات' : 'Run Scenarios Suite'}</span>
+                  <span>{runningScenarios ? 'Running Suite...' : 'Run Scenarios Suite'}</span>
                 </button>
               </div>
 
               {/* Report Summary Card */}
               {scenarioReport && (
                 <div className={`p-4 rounded-xl border ${bgCard} flex items-center justify-between text-xs`}>
-                  <div className="flex items-center space-x-3 rtl:space-x-reverse">
+                  <div className="flex items-center space-x-3">
                     <CheckCircle2 className="w-6 h-6 text-emerald-400" />
                     <div>
                       <div className="font-bold text-sm">
-                        {lang === 'ar' ? 'نتيجة الاختبارات:' : 'Test Execution Report:'}{' '}
+                        Test Execution Report:{' '}
                         <span className="text-emerald-400">{scenarioReport.passed} Passed</span> /{' '}
                         <span className="text-rose-400">{scenarioReport.failed} Failed</span>
                       </div>
@@ -2657,7 +2559,7 @@ if (verdict.decision === 'ALLOW') {
                         onClick={handleRunAllScenarios}
                         className="text-cyan-400 hover:underline font-sans"
                       >
-                        {lang === 'ar' ? 'إعادة الفحص' : 'Re-run'}
+                        Re-run
                       </button>
                     </div>
                   </div>
@@ -2672,14 +2574,12 @@ if (verdict.decision === 'ALLOW') {
           {activeSection === 'diagnostics' && (
             <div className="space-y-6 animate-in fade-in duration-200">
               <div>
-                <h2 className="text-lg font-bold flex items-center space-x-2 rtl:space-x-reverse">
+                <h2 className="text-lg font-bold flex items-center space-x-2">
                   <Cpu className="w-5 h-5 text-cyan-400" />
-                  <span>{lang === 'ar' ? 'صحة النظام والتشخيص الهندسي' : 'Diagnostics & System Health'}</span>
+                  <span>Diagnostics & System Health</span>
                 </h2>
                 <p className={`text-xs ${textMuted}`}>
-                  {lang === 'ar'
-                    ? 'تفاصيل محرك CCK، قاعدة بيانات SQLite WAL، واختبارات الوحدات وموصلات التنفيذ'
-                    : 'Engine telemetry, storage specs, Pytest verification, and connector probes'}
+                  Core engine telemetry, SQLite WAL storage metrics, Pytest matrix, and execution connector probes
                 </p>
               </div>
 
@@ -2688,7 +2588,7 @@ if (verdict.decision === 'ALLOW') {
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className={textMuted}>Pytest Status</div>
                   <div className="text-xl font-bold text-emerald-400 mt-1">105 / 105 PASS</div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">2.3s execution time</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">Automated test matrix</div>
                 </div>
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className={textMuted}>Storage Engine</div>
@@ -2703,20 +2603,18 @@ if (verdict.decision === 'ALLOW') {
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className={textMuted}>Audit Algorithm</div>
                   <div className="text-xl font-bold text-indigo-400 mt-1">SHA-256</div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">Merkle-linked chain</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">Cryptographic chain</div>
                 </div>
               </div>
 
               {/* Connectors Health & Status */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
-                <h3 className="font-bold text-sm mb-3">
-                  {lang === 'ar' ? 'الموصلات وحالة التنفيذ الخارجي' : 'Connectors & Execution Adapters'}
-                </h3>
+                <h3 className="font-bold text-sm mb-3">Connectors & Execution Adapters</h3>
                 <div className="space-y-3">
                   {connectors.map((c) => (
                     <div key={c.connector_id} className={`p-4 rounded-xl border ${bgSubtle} ${borderSubtle} text-xs`}>
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2">
-                        <div className="flex items-center space-x-2 rtl:space-x-reverse">
+                        <div className="flex items-center space-x-2">
                           <span className="font-bold text-sm">{c.name}</span>
                           <span className="font-mono text-xs text-slate-400">({c.connector_id})</span>
                         </div>
@@ -2759,13 +2657,7 @@ if (verdict.decision === 'ALLOW') {
           <div className={`w-full max-w-sm rounded-2xl border p-6 ${bgCard}`}>
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-bold text-base">
-                {authMode === 'login'
-                  ? lang === 'ar'
-                    ? 'تسجيل الدخول إلى CCK'
-                    : 'Sign in to CCK'
-                  : lang === 'ar'
-                  ? 'إنشاء حساب جديد'
-                  : 'Create CCK Account'}
+                {authMode === 'login' ? 'Sign in to CCK' : 'Create CCK Account'}
               </h3>
               <button onClick={() => setShowAuthModal(false)} className="text-slate-400 hover:text-white">
                 <X className="w-5 h-5" />
@@ -2774,7 +2666,7 @@ if (verdict.decision === 'ALLOW') {
 
             <form onSubmit={handleAuthSubmit} className="space-y-3 text-xs">
               <div>
-                <label className="block font-medium mb-1 font-sans">{lang === 'ar' ? 'اسم المستخدم' : 'Username'}</label>
+                <label className="block font-medium mb-1 font-sans">Username</label>
                 <input
                   type="text"
                   required
@@ -2788,7 +2680,7 @@ if (verdict.decision === 'ALLOW') {
 
               {authMode === 'register' && (
                 <div>
-                  <label className="block font-medium mb-1 font-sans">{lang === 'ar' ? 'الاسم الظاهر' : 'Display Name'}</label>
+                  <label className="block font-medium mb-1 font-sans">Display Name</label>
                   <input
                     type="text"
                     required
@@ -2802,7 +2694,7 @@ if (verdict.decision === 'ALLOW') {
               )}
 
               <div>
-                <label className="block font-medium mb-1 font-sans">{lang === 'ar' ? 'كلمة المرور' : 'Password'}</label>
+                <label className="block font-medium mb-1 font-sans">Password</label>
                 <input
                   type="password"
                   required
@@ -2818,13 +2710,7 @@ if (verdict.decision === 'ALLOW') {
                 type="submit"
                 className="w-full mt-2 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold font-sans text-xs transition-colors shadow-sm"
               >
-                {authMode === 'login'
-                  ? lang === 'ar'
-                    ? 'دخول'
-                    : 'Sign In'
-                  : lang === 'ar'
-                  ? 'تسجيل الحساب'
-                  : 'Register'}
+                {authMode === 'login' ? 'Sign In' : 'Register Account'}
               </button>
 
               <div className="text-center pt-2">
@@ -2834,11 +2720,7 @@ if (verdict.decision === 'ALLOW') {
                   className="text-cyan-400 hover:underline text-[11px]"
                 >
                   {authMode === 'login'
-                    ? lang === 'ar'
-                      ? 'لا تملك حساباً؟ أنشئ حساباً جديداً'
-                      : "Don't have an account? Register"
-                    : lang === 'ar'
-                    ? 'لديك حساب بالفعل؟ سجل دخولك'
+                    ? "Don't have an account? Register"
                     : 'Already have an account? Sign in'}
                 </button>
               </div>
@@ -2852,12 +2734,12 @@ if (verdict.decision === 'ALLOW') {
       {/* ------------------------------------------------------- */}
       <footer className={`border-t py-6 mt-auto text-xs ${borderSubtle} ${textMuted}`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center space-x-2 rtl:space-x-reverse font-mono text-[11px]">
-            <span>CCK Reliability & Action Gate Platform</span>
+          <div className="flex items-center space-x-2 font-mono text-[11px]">
+            <span>CCK — Agent Reliability & Causal Continuity Platform</span>
             <span>•</span>
             <span>Apache 2.0 Open Source</span>
           </div>
-          <div className="flex items-center space-x-4 rtl:space-x-reverse text-[11px]">
+          <div className="flex items-center space-x-4 text-[11px]">
             <span>Zero-Bypass Architecture</span>
             <span>•</span>
             <span>Multi-Tenant Ready</span>

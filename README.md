@@ -1,157 +1,247 @@
 # CCK — Command & Control Kit
-### منصة موثوقية وتحكم لأفعال وكلاء الذكاء الاصطناعي الخارجية
-**Reliability, Governance, and Control Platform for External AI Agent Actions**
+### Agent Reliability & Causal Continuity Platform
+
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)](pyproject.toml)
+[![Architecture: Modular Monolith](https://img.shields.io/badge/Architecture-Modular%20Monolith-emerald)](docs/architecture.md)
+[![Zero-Bypass Policy](https://img.shields.io/badge/Zero--Bypass-Enforced-success)](src/cck/reliability/action_gate.py)
 
 ---
 
-## 📌 نبذة عن المشروع / Overview
+## 📌 Overview: What is CCK?
 
-مشروع **CCK** هو منصة تحكم وموثوقية هندسية مصممة لاعتراض، وفحص، وتدقيق أفعال وكلاء الذكاء الاصطناعي (AI Agents) قبل وأثناء تفاعلها مع العالم الخارجي (أوامر الطرفية Bash، استعلامات قواعد البيانات، استدعاءات الـ APIs، والعمليات على أنظمة الملفات).
+**CCK (Command & Control Kit)** is an **Agent Reliability and Causal Continuity Platform**. It acts as a sovereign governance and execution control layer that prevents autonomous AI agents from performing irreversible real-world mutations (database writes, HTTP requests, cloud infrastructure calls, shell commands) based on facts or evidence that have become **stale, invalid, contradictory, or unsafe**.
 
-يهدف المشروع إلى توفير:
-1. **بوابة تحكم موحدة (Control Plane Gateway):** تفحص أي فعل صادر من أي وكيل بناءً على عقود بيانات صارمة وموحدة.
-2. **محرك سياسات وحواجز أمان (Policy & Guardrails Engine):** يصدر أحكامًا ملزمة (`ALLOW`, `BLOCK`, `REQUIRE_APPROVAL`).
-3. **سجل تدقيق مشفر وغير قابل للتلاعب (Cryptographic Audit Trail):** يربط كل فعل وكل حكم في سلسلة هاش متصلة تضمن إمكانية التحقق والتتبع التام.
-4. **تجريد حدود التخزين (Storage Boundary):** دعم كامل لـ SQLite للتطوير المحلي مع جاهزية معمارية للانتقال إلى PostgreSQL.
-5. **واجهات تشغيل مزدوجة:** واجهة سطر أوامر تفاعلية (CLI) مبنية بـ Typer وRich، وواجهة برمجية سريعة (HTTP REST API) مبنية بـ FastAPI.
+### The Core Problem: Fact Drift & Hallucinated Mutations
+Autonomous LLM agents maintain decisions inside volatile context windows. When an agent reads an external record (e.g., *Order #1099 is paid and ready for shipment*), external reality often shifts before or during execution (e.g., *the customer initiates a chargeback or refund*). Because the LLM context remains unaware of this drift, the agent erroneously dispatches courier parcels or mutates production records.
+
+**CCK solves this by enforcing causal continuity between:**
+1. **Entities & Real-World Resources**: Identifiable domain models tracked across systems.
+2. **Grounded Facts & Evidence**: Facts verified by cryptographic SHA-256 evidence tokens with TTL timestamps.
+3. **Dependency Preconditions**: Deterministic rules binding protected action capabilities to required fact states.
+4. **Zero-Bypass Action Gate**: Enforced policy gate returning explicit verdicts (`ALLOW`, `BLOCK`, `REQUIRE_APPROVAL`, `REVALIDATE`).
+5. **Cryptographic Audit Ledger**: Immutable SHA-256 Merkle-linked hash chain recording every decision and execution outcome.
 
 ---
 
-## 🏛️ المعمارية الهندسية (Modular Monolith Architecture)
-
-تم اعتماد معمارية **المونو الدائري المنظم (Modular Monolith)** لتحقيق أقصى درجات الأداء والموثوقية وتجنب تعقيدات الخدمات الموزعة غير الضرورية:
+## 🏛️ The 7 CCK Architecture Layers
 
 ```
-src/cck/
-├── __init__.py           # تعريف الإصدار وتصدير المكونات الأساسية
-├── core/                 # النواة المشتركة: الأنواع، الإعدادات، السجلات، الاستثناءات
-│   ├── config.py         # إعدادات Pydantic Settings مع دعم متغيرات البيئة
-│   ├── exceptions.py     # شجرة استثناءات صريحة (CCKError, StorageError, ...)
-│   ├── logging.py        # تسجيل منظم للمعلومات والأحداث
-│   └── types.py          # Enums الأساسية (VerdictDecision, RiskLevel, ...)
-├── contracts/            # عقود البيانات الصارمة المعتمدة على Pydantic v2
-│   ├── action.py         # نموذج AgentAction و AgentIdentity
-│   ├── verdict.py        # نموذج ExecutionVerdict و PolicyMatch
-│   ├── policy.py         # نموذج PolicyRule والاشتراطات
-│   ├── audit.py          # نموذج AuditRecord وسلسلة الهاش
-│   ├── entity.py         # نموذج Entity والتحقق الصارم من المعرفات
-│   ├── fact.py           # نموذج Fact وبصمة الحقل ودعم حالات الصلاحية
-│   ├── evidence.py       # نموذج Evidence والأدلة المولدة نظاميًا
-│   ├── dependency.py     # نماذج DependencyNode و ActionDependencySpec
-│   ├── journal.py        # نموذج JournalEntry وسلسلة التجزئة للتدقيق
-│   └── contract_def.py   # نموذج ContractDefinition وإصدارات العقود
-├── reliability/          # محرك الموثوقية الأساسي (Layer 1: Core Reliability Engine)
-│   ├── entity_registry.py   # سجل الكيانات ومنع خلط الأسماء المتشابهة
-│   ├── evidence_registry.py # سجل الأدلة المولدة من النظام حصراً (System-Minted)
-│   ├── fact_registry.py     # سجل الحقائق والتحقق من الإصدارات وتقادم الـ TTL
-│   ├── dependency_graph.py  # رسم بياني للاعتماديات وكشف الحلقات الدائرية (Cycle Detection)
-│   ├── freshness_engine.py  # محرك الحداثة والبصمات الدقيقة وتجنب الإبطال العشوائي
-│   ├── action_gate.py       # بوابة الأفعال المركزية (Zero-Bypass Action Gate)
-│   ├── journal.py           # سجل الأحداث غير القابل للتلاعب المتسلسل
-│   ├── replay_engine.py     # محرك إعادة التشغيل المعزول دون أي كتابة خارجية
-│   └── contract_registry.py # سجل العقود وفحص التوافقية ورفض الإصدارات الملغاة
-├── storage/              # طبقة التخزين والتجريد
-│   ├── base.py           # واجهة التخزين المجردة StorageBackend (Protocol)
-│   ├── schema.py         # مخططات DDL لـ SQLite وخريطة الانتقال لـ PostgreSQL
-│   └── sqlite.py         # التنفيذ غير المتزامن المعتمد على aiosqlite
-├── policies/             # محرك فحص السياسات والقواعد المعيارية
-│   └── engine.py         # فحص الأوامر المدمرة، المسارات الحساسة، والحاجة للموافقة
-├── audit/                # إدارة سجلات التدقيق وسلاسل النزاهة
-│   └── service.py        # حساب SHA-256 والتحقق من سلامة السلسلة
-├── runtime/              # محرك التشغيل الرئيسي
-│   └── engine.py         # CCKControlPlane الجامع للسياسات والتخزين والتدقيق
-├── api/                  # واجهة الويب REST API
-│   └── app.py            # تطبيق FastAPI ومسارات الفحص والصحة والسياسات
-└── cli/                  # واجهة سطر الأوامر
-    └── main.py           # أوامر Typer (info, init-db, inspect-action, run-server)
+                               ┌──────────────────────────────────────────────┐
+                               │       Autonomous Agent / LLM Client          │
+                               └──────────────────────┬───────────────────────┘
+                                                      │
+                       ┌──────────────────────────────▼──────────────────────────────┐
+                       │                   CCK Control Plane Gateway                 │
+                       │             (FastAPI / Express Gateway / MCP Server)        │
+                       └──────────────────────────────┬──────────────────────────────┘
+                                                      │
+         ┌────────────────────────────────────────────┼────────────────────────────────────────────┐
+         │                                            │                                            │
+┌────────▼──────────────┐             ┌───────────────▼───────────────┐            ┌───────────────▼───────────────┐
+│  Layer 1: Reliability │             │   Layer 3: Control & Policy   │            │   Layer 4: Audit & Recovery   │
+│  - Entity Registry    │             │   - POL-SEC Rules Engine      │            │   - SHA-256 Hash Ledger       │
+│  - Grounded Facts     │             │   - Blast Radius Rate Limits  │            │   - Decision Replay Engine    │
+│  - Evidence Minting   │             │   - Human Approval Workflows  │            │   - Compensation Rollback     │
+│  - Action Gate (Eval) │             │   - Multi-Tenant RBAC         │            │   - Observability & Tracing   │
+└────────┬──────────────┘             └───────────────┬───────────────┘            └───────────────┬───────────────┘
+         │                                            │                                            │
+         └────────────────────────────────────────────┼────────────────────────────────────────────┘
+                                                      │
+                                      ┌───────────────▼───────────────┐
+                                      │  Layer 2: Execution Adapters  │
+                                      │  - Zero-Bypass Connector Gate │
+                                      │  - CAS (Conditional Writes)   │
+                                      │  - Idempotency Deduplication  │
+                                      └───────────────┬───────────────┘
+                                                      │
+                               ┌──────────────────────▼───────────────────────┐
+                               │           External Real-World Target         │
+                               │   (Databases, Stripe, FedEx, Cloud Infra)   │
+                               └──────────────────────────────────────────────┘
 ```
+
+1. **Layer 1: Core Reliability Engine** — Entity and Fact registries, Evidence token hashing, Freshness tracking, and Action Gate precondition checks.
+2. **Layer 2: Execution Adapters & Connectors** — Isolating agents from raw APIs. Supports Conditional Writes (Compare-And-Swap), Compensation rollbacks, and secret sanitation.
+3. **Layer 3: Control Plane & Governance** — Active security policies (`POL-SEC`), blast-radius limits, human supervisor review queues, and multi-tenant project isolation.
+4. **Layer 4: Audit, Observability & Recovery** — Cryptographically chained SHA-256 event ledger, automated decision replay, and impact analysis.
+5. **Layer 5: Testing & Fault Injection Lab** — CLI scenarios runner (`cck test ./scenarios`), network timeout simulation, and non-destructive replay.
+6. **Layer 6: Integrations & Developer Platform** — Model Context Protocol (MCP) server, native Python and TypeScript SDKs, and REST API endpoints.
+7. **Layer 7: Multi-Tenancy & Enterprise Cloud** — Tenant workspace boundaries, SQLite WAL mode for local high-performance operations, and documented PostgreSQL enterprise schema.
 
 ---
 
-## 🚀 التثبيت والتشغيل / Getting Started
+## 🚀 Quickstart & Local Installation
 
-### 1. المتطلبات الأساسية
-- Python 3.10 أو أحدث.
-- أداة `uv` لإدارة البيئة الافتراضية والتبعيات (أو `pip`).
+### Prerequisites
+- **Node.js**: v18.0.0 or higher
+- **Python**: v3.10, v3.11, or v3.12 (optional for standalone CLI)
+- **Git**
 
-### 2. تجهيز البيئة الافتراضية وتثبيت التبعيات
-```bash
-# إنشاء البيئة الافتراضية
-uv venv .venv --python 3.10
-
-# تفعيل البيئة (Linux/macOS)
-source .venv/bin/activate
-
-# تثبيت الحزمة والتبعيات التطويرية
-uv pip install -e ".[dev]"
-```
-
----
-
-## 🧪 أوامر الاختبار والفحص / Testing & Linting
-
-تم إعداد بيئة اختبار شاملة تغطي 58 اختبارًا لوحدات التأسيس ومحرك الموثوقية الأساسي (Layer 1)، بما فيها سيناريو القبول الإلزامي (إبطال حالة الطلب وتحول القرار إلى BLOCK):
+### Installation
 
 ```bash
-# تشغيل جميع الاختبارات (58 اختبارًا)
-.venv/bin/pytest -v
+# 1. Clone the repository
+git clone https://github.com/ghazghazibahaeddin-arch/cck.git
+cd cck
 
-# تشغيل اختبارات القبول الإلزامية لطبقة الموثوقية فقط
-.venv/bin/pytest -v tests/integration/test_acceptance_scenarios.py
+# 2. Install dependencies
+npm install
 
-# فحص التنسيق والأنماط البرمجية باستخدام ruff
-.venv/bin/ruff check .
+# 3. Start the Full-Stack Developer Console & API Gateway
+npm run dev
+```
+
+The web console and API server will be available at:
+- **Web SaaS Console**: [http://localhost:3000](http://localhost:3000)
+- **API Health Check**: [http://localhost:3000/health](http://localhost:3000/health)
+- **System Metrics & Audit Status**: [http://localhost:3000/api/v1/system/status](http://localhost:3000/api/v1/system/status)
+
+---
+
+## 🔌 Model Context Protocol (MCP) Integration
+
+CCK natively implements the **Model Context Protocol (MCP)** specification (Protocol Version: `2024-11-05`), allowing LLMs (Claude Desktop, Cursor, Custom Agents) to connect directly to CCK over `stdio`.
+
+### Configure in Claude Desktop / Cursor
+Add CCK to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "cck": {
+      "command": "cck",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Or via Docker:
+```json
+{
+  "mcpServers": {
+    "cck": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "cck:latest", "cck", "mcp"]
+    }
+  }
+}
+```
+
+### Exposed MCP Tools
+- `cck_evaluate_action`: Evaluates a planned agent action against policies, fact freshness, and preconditions before execution.
+- `cck_record_evidence`: Mints a cryptographic evidence token with payload digest.
+- `cck_query_fact`: Inspects the current state, version, and validity of a real-world entity fact.
+- `cck_execute_via_connector`: Executes a verified action through a safe connector adapter with zero bypass.
+
+---
+
+## 💻 Developer SDKs
+
+### Python SDK
+
+```python
+from cck.sdk import CCKClient
+
+client = CCKClient(api_key="cck_live_...")
+
+# Pre-execution check
+verdict = client.evaluate_action(
+    capability="logistics.ship",
+    target="courier.fedex",
+    command="dispatch_parcel(order_id='1099')"
+)
+
+if verdict.is_allowed:
+    # Safe to invoke external mutation
+    execute_shipment()
+else:
+    print(f"Action Blocked by CCK: {verdict.reason}")
+    print(f"Risk Score: {verdict.risk_score}")
+```
+
+### TypeScript SDK
+
+```typescript
+import { CCKClient } from '@cck/sdk';
+
+const cck = new CCKClient({ apiKey: 'cck_live_...' });
+
+const verdict = await cck.evaluateAction({
+  capability: 'logistics.ship',
+  target: 'courier.fedex',
+  command: 'dispatch_parcel(order_id="1099")'
+});
+
+if (verdict.decision === 'ALLOW') {
+  await courier.dispatch();
+} else {
+  console.warn(`Blocked: ${verdict.reason}`);
+}
 ```
 
 ---
 
-## 💻 استخدام واجهة سطر الأوامر (CCK CLI)
+## 🔒 Security & Cryptographic Audit Ledger
 
-توفر أداة `cck` إمكانية فحص النظام والتحقق من سيناريوهات الأفعال مباشرة:
+Every action evaluated by CCK appends an entry to a tamper-evident **SHA-256 Merkle-linked hash chain**:
+
+$$\text{ActionHash}_n = \text{SHA256}(\text{ActionHash}_{n-1} \parallel \text{AuditID}_n \parallel \text{ActionID}_n \parallel \text{Decision}_n \parallel \text{Timestamp}_n)$$
+
+### Verifying Integrity via API:
+```bash
+curl -X GET http://localhost:3000/api/v1/audits/verify-chain
+```
+**Response:**
+```json
+{
+  "verified": true,
+  "total_records": 12,
+  "algorithm": "SHA-256",
+  "latest_hash": "a1b2c3d4...",
+  "tamper_detected": false
+}
+```
+
+---
+
+## 🧪 Scenarios Testing Lab (`cck test`)
+
+Run the automated acceptance scenarios suite:
 
 ```bash
-# عرض معلومات البيئة وحالة منصة التحكم
-.venv/bin/python -m cck.cli.main info
+# Run via API
+curl -X POST http://localhost:3000/api/v1/scenarios/run
 
-# تهيئة قاعدة بيانات SQLite وتحميل سياسات الأمان المعيارية
-.venv/bin/python -m cck.cli.main init-db
+# Or via Python CLI (when installed)
+cck test ./scenarios
+```
 
-# فحص سيناريو أمر مدمر (مثل rm -rf /) ورؤية قرار المنع الفوري
-.venv/bin/python -m cck.cli.main inspect-action scenarios/destructive_command_scenario.json
+### Verified Test Suite:
+1. `scen_stale_fact_01.json` — Order Status Drift (`paid` $\to$ `refunded` $\to$ `BLOCK`).
+2. `scen_timeout_fault_injection.json` — Network Timeout Fault Injection & Idempotency.
+3. `scen_destructive_blocked.json` — Destructive Root Shell Command (`rm -rf /`) Blocked.
+4. `scen_system_mutation_approval.json` — System Mutation Demands Human Approval (`systemctl stop`).
+5. `scen_disconnect_fault.json` — Post-Dispatch Network Disconnection Recovery.
+6. `scen_safe_read_and_execute.json` — Safe Read & Inventory Inspection (`ALLOW`).
 
-# فحص سيناريو تعديل نظام يتطلب موافقة بشرية
-.venv/bin/python -m cck.cli.main inspect-action scenarios/system_mutation_scenario.json
+---
 
-# تشغيل خادم الـ API عبر سطر الأوامر
-.venv/bin/python -m cck.cli.main run-server --port 8000
+## ⚙️ Environment Variables
+
+Copy `.env.example` to `.env`:
+
+```env
+PORT=3000
+ENVIRONMENT=production
+DATABASE_URL=sqlite:///cck.db
+ENABLE_TAMPER_EVIDENT_CHAIN=true
+DEFAULT_TENANT_ID=tenant-corp-acme
 ```
 
 ---
 
-## 🌐 واجهة الويب البرمجية (REST API)
+## 📄 License
 
-يمكن تشغيل خادم FastAPI مباشرة:
-
-```bash
-.venv/bin/uvicorn cck.api.app:app --host 0.0.0.0 --port 8000
-```
-
-### أهم المسارات (Endpoints):
-- `GET /health` : فحص حالة الخادم وجاهزية المكونات.
-- `GET /api/v1/info` : عرض إحصائيات المنصة، عدد السياسات الفعالة، ونوع التخزين.
-- `POST /api/v1/actions/evaluate` : استقبال كائن `AgentAction` وإرجاع حكم `ExecutionVerdict`.
-- `GET /api/v1/policies` : عرض قائمة السياسات وحواجز الأمان المفعلة.
-- `GET /api/v1/audits` : تصفح سجل التدقيق المشفر بالتسلسل الزمني.
-
----
-
-## 📁 المجلدات التوثيقية والسيناريوهات
-- `docs/architecture_decisions.md`: سجل قرارات المعمارية الأساسية (ADR-001 إلى ADR-004).
-- `docs/contracts_and_schemas.md`: توثيق مواصفات البيانات وعقود النماذج.
-- `scenarios/`: نماذج وسيناريوهات جاهزة لاختبار أفعال الوكلاء (آمنة، مدمرة، حرجة).
-- `tests/`: جناح الاختبارات الوحدوية والتكاملية لجميع الطبقات.
-
----
-
-## ⚖️ معيار القبول ورسالة المرحلة الحالية
-تم تأسيس الهيكل الهندسي، وحزم التبعيات، وتجريد التخزين، وعقود البيانات، ومحرك القواعد الأولي، مع اجتياز كامل للاختبارات دون أخطاء. ولم يتم التوسع خارج نطاق مرحلة التأسيس حتى يتم اعتمادها.
+CCK is distributed under the **Apache License 2.0**. See [LICENSE](LICENSE) for details.
