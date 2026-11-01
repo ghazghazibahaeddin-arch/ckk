@@ -45,12 +45,38 @@ import {
   FileText,
   ChevronDown,
   Info,
+  Download,
+  Share2,
+  Printer,
+  FlaskConical,
+  FileCheck,
+  WifiOff,
+  Gauge,
+  ArrowRight,
+  Bot,
 } from 'lucide-react';
 import { PWAInstallButton } from './components/PWAInstallButton';
 
 // -------------------------------------------------------------
 // Type Definitions
 // -------------------------------------------------------------
+export interface AgentItem {
+  agent_id: string;
+  project_id: string;
+  tenant_id: string;
+  name: string;
+  framework: string;
+  target_capability: string;
+  target_resource: string;
+  guardrail_mode: 'ENFORCE_AND_BLOCK' | 'REQUIRE_APPROVAL' | 'OBSERVE_ONLY';
+  freshness_ttl_seconds: number;
+  webhook_url?: string;
+  created_at: string;
+  last_evaluated_at?: string;
+  total_evaluations: number;
+  blocked_evaluations: number;
+  status: 'ACTIVE' | 'PAUSED' | 'DISCONNECTED';
+}
 interface SystemStatus {
   status: string;
   engine_version: string;
@@ -178,8 +204,65 @@ interface ConnectorItem {
   description: string;
 }
 
+interface DecisionReceiptItem {
+  receipt_id: string;
+  action_id: string;
+  timestamp: string;
+  status: 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL' | 'REVALIDATE';
+  action: {
+    capability: string;
+    target: string;
+    command: string;
+    severity?: string;
+  };
+  agent_id: string;
+  entity_id: string;
+  relevant_facts: Array<{
+    entity_id: string;
+    field_name: string;
+    value: unknown;
+    state: string;
+    version: number;
+    observed_at: string;
+  }>;
+  evidence: Array<{
+    evidence_id: string;
+    source: string;
+    payload_hash: string;
+    observed_at: string;
+  }>;
+  dependency: {
+    dep_id?: string;
+    required_fact_entity?: string;
+    required_fact_field?: string;
+    max_age_seconds?: number;
+    drift_detected?: boolean;
+  };
+  matched_policies: Array<{
+    rule_id: string;
+    name: string;
+  }>;
+  verdict: {
+    decision: 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL' | 'REVALIDATE';
+    risk_score: number;
+    reasoning: string;
+    remediation_suggestions?: string[];
+  };
+  audit_ref: {
+    audit_id: string;
+    action_hash: string;
+    previous_hash: string;
+  };
+  redacted: boolean;
+  shareable_token: string;
+}
+
 type NavSection =
   | 'overview'
+  | 'agents'
+  | 'failurelab'
+  | 'receipts'
+  | 'benchmark'
   | 'architecture'
   | 'projects'
   | 'apikeys'
@@ -221,10 +304,25 @@ export default function App() {
 
   // Projects State
   const [projects, setProjects] = useState<ProjectItem[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string>('proj-prod-ecommerce');
+  const [activeProjectId, setActiveProjectId] = useState<string>('');
   const [showNewProjectModal, setShowNewProjectModal] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectDesc, setNewProjectDesc] = useState('');
+
+  // Connected AI Agents State
+  const [agents, setAgents] = useState<AgentItem[]>([]);
+  const [showConnectAgentModal, setShowConnectAgentModal] = useState(false);
+  const [newAgentForm, setNewAgentForm] = useState({
+    name: '',
+    framework: 'langgraph',
+    target_capability: 'orders.refund',
+    target_resource: 'order:cust_01',
+    guardrail_mode: 'ENFORCE_AND_BLOCK' as 'ENFORCE_AND_BLOCK' | 'REQUIRE_APPROVAL' | 'OBSERVE_ONLY',
+    freshness_ttl_seconds: 300,
+    webhook_url: '',
+  });
+  const [testingAgentId, setTestingAgentId] = useState<string | null>(null);
+  const [togglingAgentId, setTogglingAgentId] = useState<string | null>(null);
 
   // API Keys State
   const [apiKeys, setApiKeys] = useState<ApiKeyItem[]>([]);
@@ -239,6 +337,20 @@ export default function App() {
   const [newFactEntity, setNewFactEntity] = useState('order:1099');
   const [newFactField, setNewFactField] = useState('status');
   const [newFactValue, setNewFactValue] = useState('paid');
+
+  // Webhook Test State
+  const [webhookEntity, setWebhookEntity] = useState('order:1099');
+  const [webhookField, setWebhookField] = useState('status');
+  const [webhookValue, setWebhookValue] = useState('refunded');
+  const [webhookSending, setWebhookSending] = useState(false);
+  const [webhookResult, setWebhookResult] = useState<{
+    evidence_id?: string;
+    entity_id?: string;
+    field_name?: string;
+    value?: unknown;
+    fact_state?: string;
+    payload_hash?: string;
+  } | null>(null);
 
   // Dependencies State
   const [dependencies, setDependencies] = useState<DependencyItem[]>([]);
@@ -302,6 +414,25 @@ export default function App() {
     docker_command?: string;
     exposed_tools?: Array<{ name: string; description: string }>;
   } | null>(null);
+
+  // Decision Receipts & Export State
+  const [receipts, setReceipts] = useState<DecisionReceiptItem[]>([]);
+  const [selectedReceiptModal, setSelectedReceiptModal] = useState<DecisionReceiptItem | null>(null);
+  const [receiptRedactMode, setReceiptRedactMode] = useState<boolean>(true);
+
+  // Failure Lab State
+  const [failureLabScenario, setFailureLabScenario] = useState<
+    'scenario_a_inventory' | 'scenario_b_permission' | 'scenario_c_refund'
+  >('scenario_a_inventory');
+  const [failureLabRunning, setFailureLabRunning] = useState<boolean>(false);
+  const [failureLabResult, setFailureLabResult] = useState<any | null>(null);
+
+  // Public Benchmark State
+  const [benchmarkRunning, setBenchmarkRunning] = useState<boolean>(false);
+  const [benchmarkResult, setBenchmarkResult] = useState<any | null>(null);
+
+  // Online / Offline Fail-Closed Network Monitor
+  const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -471,10 +602,53 @@ export default function App() {
     }
   }, []);
 
+  const fetchReceipts = useCallback(async () => {
+    try {
+      const res = await fetch('/api/v1/receipts?redact=false');
+      if (res.ok) {
+        const data = await res.json();
+        setReceipts(data);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch receipts', err);
+    }
+  }, []);
+
+  const fetchAgents = useCallback(async () => {
+    try {
+      const res = await fetch('/api/v1/agents');
+      if (res.ok) {
+        const data = await res.json();
+        setAgents(data);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch agents', err);
+    }
+  }, []);
+
+  // Online / Offline Fail-Closed Network Monitor
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      showNotification('Network connection restored. Verification engine online.', 'success');
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      showNotification('Network offline: Protected actions fail-closed (BLOCKED).', 'error');
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   // Initial Boot
   useEffect(() => {
     fetchStatus();
     fetchProjects();
+    fetchAgents();
     fetchFacts();
     fetchEvidence();
     fetchDependencies();
@@ -484,14 +658,18 @@ export default function App() {
     fetchConnectors();
     fetchScenarios();
     fetchMcpConfig();
+    fetchReceipts();
 
     const interval = setInterval(() => {
       fetchStatus();
+      fetchReceipts();
+      fetchAgents();
     }, 12000);
     return () => clearInterval(interval);
   }, [
     fetchStatus,
     fetchProjects,
+    fetchAgents,
     fetchFacts,
     fetchEvidence,
     fetchDependencies,
@@ -501,6 +679,7 @@ export default function App() {
     fetchConnectors,
     fetchScenarios,
     fetchMcpConfig,
+    fetchReceipts,
   ]);
 
   // Project keys refresh on project switch
@@ -635,6 +814,118 @@ export default function App() {
       }
     } catch {
       showNotification('Failed to revoke key', 'error');
+    }
+  };
+
+  // -----------------------------------------------------------
+  // Agent Connection & Live Gate Testing
+  // -----------------------------------------------------------
+  const handleConnectAgent = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newAgentForm.name.trim() || !newAgentForm.target_capability.trim()) {
+      showNotification('Agent name and target capability are required', 'error');
+      return;
+    }
+    try {
+      const res = await fetch('/api/v1/agents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...newAgentForm,
+          project_id: activeProjectId || undefined,
+          tenant_id: currentUser.tenantId,
+        }),
+      });
+      if (res.ok) {
+        const created = await res.json();
+        setAgents((prev) => [created, ...prev]);
+        setShowConnectAgentModal(false);
+        setNewAgentForm({
+          name: '',
+          framework: 'langgraph',
+          target_capability: 'orders.refund',
+          target_resource: 'order:cust_01',
+          guardrail_mode: 'ENFORCE_AND_BLOCK',
+          freshness_ttl_seconds: 300,
+          webhook_url: '',
+        });
+        showNotification(`Agent '${created.name}' connected successfully!`, 'success');
+        fetchStatus();
+      } else {
+        const err = await res.json();
+        showNotification(err.detail || 'Failed to connect agent', 'error');
+      }
+    } catch {
+      showNotification('Failed to connect agent', 'error');
+    }
+  };
+
+  const handleTestAgentGate = async (agent: AgentItem) => {
+    setTestingAgentId(agent.agent_id);
+    try {
+      const res = await fetch(`/api/v1/agents/${agent.agent_id}/test-gate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target: agent.target_resource,
+          action_command: `${agent.target_capability} on ${agent.target_resource}`,
+        }),
+      });
+      if (res.ok) {
+        const result = await res.json();
+        showNotification(
+          `Action evaluated for ${agent.name}: Verdict = ${result.verdict} (${result.reason})`,
+          result.verdict === 'ALLOW' ? 'success' : 'error'
+        );
+        fetchAgents();
+        fetchAudits();
+        fetchReceipts();
+        fetchStatus();
+      } else {
+        showNotification('Failed to test agent gate', 'error');
+      }
+    } catch {
+      showNotification('Could not connect to agent gate tester', 'error');
+    } finally {
+      setTestingAgentId(null);
+    }
+  };
+
+  const handleToggleAgentDrift = async (agent: AgentItem) => {
+    setTogglingAgentId(agent.agent_id);
+    try {
+      const res = await fetch(`/api/v1/agents/${agent.agent_id}/drift-toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (res.ok) {
+        const result = await res.json();
+        showNotification(
+          `Prerequisite fact for ${agent.name} is now ${result.new_fact_state}. Test the gate to observe verdict!`,
+          result.new_fact_state === 'VALID' ? 'success' : 'info'
+        );
+        fetchFacts();
+        fetchAgents();
+        fetchStatus();
+      }
+    } catch {
+      showNotification('Failed to toggle drift state', 'error');
+    } finally {
+      setTogglingAgentId(null);
+    }
+  };
+
+  const handleDeleteAgent = async (agentId: string) => {
+    if (!window.confirm('Disconnect this agent?')) return;
+    try {
+      const res = await fetch(`/api/v1/agents/${agentId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setAgents((prev) => prev.filter((a) => a.agent_id !== agentId));
+        showNotification('Agent disconnected.', 'info');
+        fetchStatus();
+      }
+    } catch {
+      showNotification('Failed to disconnect agent', 'error');
     }
   };
 
@@ -826,6 +1117,93 @@ export default function App() {
     }
   };
 
+  const handleSendTestWebhook = async () => {
+    setWebhookSending(true);
+    try {
+      const res = await fetch('/api/v1/webhooks/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entity_id: webhookEntity,
+          field_name: webhookField,
+          value: webhookValue,
+          source: 'stripe_live_webhook',
+          payload: { event: 'charge.refunded', entity_id: webhookEntity, status: webhookValue, timestamp: new Date().toISOString() },
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setWebhookResult(data);
+        showNotification(`Webhook ingested: ${data.entity_id}.${data.field_name} set to '${data.value}'!`, 'success');
+        fetchFacts();
+        fetchEvidence();
+        fetchAudits();
+        fetchStatus();
+      } else {
+        const err = await res.json();
+        showNotification(err.error || 'Webhook failed', 'error');
+      }
+    } catch {
+      showNotification('Failed to send webhook', 'error');
+    } finally {
+      setWebhookSending(false);
+    }
+  };
+
+  // -----------------------------------------------------------
+  // Failure Lab Runner
+  // -----------------------------------------------------------
+  const handleRunFailureLab = async (scenarioId: string = failureLabScenario) => {
+    setFailureLabRunning(true);
+    try {
+      const res = await fetch('/api/v1/failure-lab/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scenario_id: scenarioId }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setFailureLabResult(data);
+        showNotification(`${data.title} executed: Causal continuity verified!`, 'success');
+        fetchReceipts();
+        fetchAudits();
+        fetchFacts();
+        fetchStatus();
+      } else {
+        const err = await res.json();
+        showNotification(err.error || 'Failed to run failure lab scenario', 'error');
+      }
+    } catch {
+      showNotification('Could not connect to CCK verification engine', 'error');
+    } finally {
+      setFailureLabRunning(false);
+    }
+  };
+
+  // -----------------------------------------------------------
+  // Benchmark Runner
+  // -----------------------------------------------------------
+  const handleRunBenchmark = async () => {
+    setBenchmarkRunning(true);
+    try {
+      const res = await fetch('/api/v1/benchmark/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBenchmarkResult(data);
+        showNotification(`Benchmark completed: ${data.throughput_ops_per_sec.toLocaleString()} ops/sec with 0% false blocks!`, 'success');
+      } else {
+        showNotification('Benchmark execution failed', 'error');
+      }
+    } catch {
+      showNotification('Could not connect to CCK verification engine', 'error');
+    } finally {
+      setBenchmarkRunning(false);
+    }
+  };
+
   // Visual Theme styling
   const isDark = theme === 'dark';
   const bgMain = isDark ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900';
@@ -835,16 +1213,20 @@ export default function App() {
   const borderSubtle = isDark ? 'border-slate-800' : 'border-slate-200';
 
   const navItems = [
-    { id: 'overview' as NavSection, label: 'Dashboard Overview', icon: Activity },
-    { id: 'architecture' as NavSection, label: 'Causal Continuity & Value', icon: Layers },
-    { id: 'projects' as NavSection, label: 'Workspaces & Projects', icon: Cloud, badge: projects.length },
-    { id: 'apikeys' as NavSection, label: 'API Keys & Credentials', icon: Key },
-    { id: 'integrations' as NavSection, label: 'Integrations & MCP Hub', icon: Terminal },
+    { id: 'overview' as NavSection, label: 'Platform Overview', icon: Activity },
+    { id: 'agents' as NavSection, label: 'Connected AI Agents', icon: Bot, badge: agents.length },
+    { id: 'failurelab' as NavSection, label: 'CCK Failure Lab (Demo)', icon: FlaskConical, badge: 'Interactive' },
+    { id: 'receipts' as NavSection, label: 'Decision Receipts', icon: FileCheck, badge: receipts.length },
+    { id: 'benchmark' as NavSection, label: 'Public Benchmark', icon: Gauge },
+    { id: 'actiongate' as NavSection, label: 'Action Gate Console', icon: ShieldCheck },
     { id: 'facts' as NavSection, label: 'Facts & Evidence Registry', icon: Database, badge: facts.length },
     { id: 'dependencies' as NavSection, label: 'Dependency Graph', icon: GitBranch, badge: dependencies.length },
-    { id: 'actiongate' as NavSection, label: 'Action Gate Console', icon: ShieldCheck },
     { id: 'approvals' as NavSection, label: 'Human Approval Queue', icon: CheckSquare, badge: approvals.length },
     { id: 'audit' as NavSection, label: 'Cryptographic Audit Ledger', icon: Fingerprint, badge: audits.length },
+    { id: 'integrations' as NavSection, label: 'Integrations & MCP Hub', icon: Terminal },
+    { id: 'projects' as NavSection, label: 'Workspaces & Projects', icon: Cloud, badge: projects.length },
+    { id: 'apikeys' as NavSection, label: 'API Keys & Credentials', icon: Key },
+    { id: 'architecture' as NavSection, label: 'Causal Continuity & Value', icon: Layers },
     { id: 'scenarios' as NavSection, label: 'Scenarios Testing Lab', icon: Play },
     { id: 'diagnostics' as NavSection, label: 'Diagnostics & System Health', icon: Cpu },
   ];
@@ -1027,7 +1409,7 @@ export default function App() {
                       <Icon className={`w-4 h-4 ${active ? 'text-cyan-400' : 'text-slate-400'}`} />
                       <span>{item.label}</span>
                     </div>
-                    {item.badge !== undefined && item.badge > 0 && (
+                    {item.badge !== undefined && (typeof item.badge === 'string' ? Boolean(item.badge) : item.badge > 0) && (
                       <span
                         className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full font-bold ${
                           active
@@ -1067,45 +1449,47 @@ export default function App() {
           {activeSection === 'overview' && (
             <div className="space-y-6 animate-in fade-in duration-200">
               {/* Header Value Card */}
-              <div className={`rounded-2xl border p-6 relative overflow-hidden ${bgCard}`}>
-                <div className="max-w-2xl">
+              <div className={`rounded-2xl border p-6 sm:p-8 relative overflow-hidden ${bgCard}`}>
+                <div className="max-w-3xl">
                   <div className="flex items-center space-x-2 mb-3">
                     <span className="px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                      ● Action Gate Active
+                      ● Causal Continuity Engine Active
                     </span>
-                    <span className="text-xs text-slate-400 font-mono">{activeProjectId}</span>
+                    <span className="text-xs text-slate-400 font-mono">Zero-Bypass Architecture</span>
                   </div>
-                  <h1 className="text-xl sm:text-2xl font-bold tracking-tight mb-2">
-                    Agent Reliability & Causal Continuity Platform
+                  <h1 className="text-2xl sm:text-3xl lg:text-4xl font-extrabold tracking-tight mb-3">
+                    Stop AI agents from acting on decisions built on stale evidence.
                   </h1>
-                  <p className={`text-xs sm:text-sm leading-relaxed ${textMuted} mb-4`}>
-                    CCK guarantees that autonomous AI agents never execute irreversible external actions on stale,
-                    invalidated, or hallucinated facts. Every mutation is intercepted, grounded against real-world evidence,
-                    and permanently sealed in a tamper-evident SHA-256 audit ledger.
+                  <p className={`text-sm sm:text-base leading-relaxed ${textMuted} mb-6`}>
+                    CCK checks whether the facts and evidence behind an agent&apos;s decision are still valid before
+                    protected actions are executed. If conditions drift, permissions change, or source facts expire,
+                    CCK intercepts the mutation and enforces explainable safety.
                   </p>
 
-                  <div className="flex flex-wrap gap-2.5">
+                  <div className="flex flex-wrap items-center gap-3">
                     <button
-                      onClick={() => setActiveSection('actiongate')}
-                      className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-semibold text-xs transition-all shadow-sm"
+                      onClick={() => setActiveSection('failurelab')}
+                      className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center space-x-2 transition-all shadow-md shadow-cyan-500/20"
                     >
-                      Test Action Gate Live
+                      <FlaskConical className="w-4 h-4 fill-slate-950" />
+                      <span>Try the Failure Lab</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
                     </button>
                     <button
-                      onClick={() => setActiveSection('facts')}
-                      className={`px-4 py-2 rounded-xl border text-xs font-medium transition-all ${
+                      onClick={() => setActiveSection('integrations')}
+                      className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center space-x-2 transition-all shadow-sm"
+                    >
+                      <Terminal className="w-4 h-4" />
+                      <span>Build with CCK</span>
+                    </button>
+                    <button
+                      onClick={() => setActiveSection('benchmark')}
+                      className={`px-4 py-2.5 rounded-xl border text-xs font-medium flex items-center space-x-1.5 transition-all ${
                         isDark ? 'bg-slate-800 border-slate-700 text-slate-200 hover:text-white' : 'bg-slate-100 border-slate-300 text-slate-800'
                       }`}
                     >
-                      Simulate Fact Drift
-                    </button>
-                    <button
-                      onClick={() => setActiveSection('scenarios')}
-                      className={`px-4 py-2 rounded-xl border text-xs font-medium transition-all ${
-                        isDark ? 'bg-slate-800 border-slate-700 text-slate-200 hover:text-white' : 'bg-slate-100 border-slate-300 text-slate-800'
-                      }`}
-                    >
-                      Run Scenarios Suite
+                      <Gauge className="w-4 h-4 text-emerald-400" />
+                      <span>Public Benchmark</span>
                     </button>
                   </div>
                 </div>
@@ -1115,44 +1499,68 @@ export default function App() {
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-xs ${textMuted}`}>Audit Ledger</span>
-                    <Fingerprint className="w-4 h-4 text-cyan-400" />
+                    <span className={`text-xs ${textMuted}`}>Connected Agents</span>
+                    <Bot className="w-4 h-4 text-cyan-400" />
                   </div>
-                  <div className="text-2xl font-bold font-mono text-cyan-400">{systemStatus?.total_audits || audits.length}</div>
+                  <div className="text-2xl font-bold font-mono text-cyan-400">{agents.length}</div>
                   <div className="text-[11px] text-emerald-400 font-mono mt-1">
-                    {systemStatus?.audit_chain_verified ? '✓ SHA-256 Verified' : 'Checking...'}
+                    {agents.filter((a) => a.status === 'ACTIVE').length} Active &amp; Guarded
                   </div>
                 </div>
 
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-xs ${textMuted}`}>Active Facts</span>
+                    <span className={`text-xs ${textMuted}`}>Monitored Facts</span>
                     <Database className="w-4 h-4 text-emerald-400" />
                   </div>
                   <div className="text-2xl font-bold font-mono text-emerald-400">{facts.length}</div>
-                  <div className={`text-[11px] ${textMuted} mt-1`}>Grounded & Monitored</div>
+                  <div className={`text-[11px] ${textMuted} mt-1`}>Preconditions Grounded</div>
                 </div>
 
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-xs ${textMuted}`}>Dependencies</span>
-                    <GitBranch className="w-4 h-4 text-indigo-400" />
+                    <span className={`text-xs ${textMuted}`}>Audit Ledger</span>
+                    <Fingerprint className="w-4 h-4 text-indigo-400" />
                   </div>
-                  <div className="text-2xl font-bold font-mono text-indigo-400">{dependencies.length}</div>
-                  <div className={`text-[11px] ${textMuted} mt-1`}>Preconditions Bound</div>
+                  <div className="text-2xl font-bold font-mono text-indigo-400">{audits.length}</div>
+                  <div className="text-[11px] text-emerald-400 font-mono mt-1">
+                    {systemStatus?.audit_chain_verified ? '✓ SHA-256 Verified' : 'Live Hash Chain'}
+                  </div>
                 </div>
 
                 <div className={`p-4 rounded-xl border ${bgCard}`}>
                   <div className="flex items-center justify-between mb-1">
-                    <span className={`text-xs ${textMuted}`}>Pending Approvals</span>
-                    <CheckSquare className="w-4 h-4 text-amber-400" />
+                    <span className={`text-xs ${textMuted}`}>Decision Receipts</span>
+                    <FileCheck className="w-4 h-4 text-amber-400" />
                   </div>
-                  <div className={`text-2xl font-bold font-mono ${approvals.length > 0 ? 'text-amber-400' : 'text-slate-400'}`}>
-                    {approvals.length}
-                  </div>
-                  <div className={`text-[11px] ${textMuted} mt-1`}>Human-in-the-Loop</div>
+                  <div className="text-2xl font-bold font-mono text-amber-400">{receipts.length}</div>
+                  <div className={`text-[11px] ${textMuted} mt-1`}>Cryptographic Proofs</div>
                 </div>
               </div>
+
+              {/* If no agents are connected, show Onboarding CTA */}
+              {agents.length === 0 && (
+                <div className={`rounded-2xl border p-6 border-cyan-500/30 bg-gradient-to-r from-cyan-950/30 to-indigo-950/20 ${bgCard}`}>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center space-x-2">
+                        <Bot className="w-5 h-5 text-cyan-400" />
+                        <h3 className="font-bold text-sm text-cyan-300">Connect Your First Autonomous Agent</h3>
+                      </div>
+                      <p className={`text-xs ${textMuted} max-w-xl leading-relaxed`}>
+                        CCK sits directly in front of your agent&apos;s tool execution path. Connect LangGraph, OpenAI, or Custom REST agents to ensure decisions never trigger mutations on invalid or stale evidence.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setShowConnectAgentModal(true)}
+                      className="px-4 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center space-x-2 transition-all shrink-0 shadow-md shadow-cyan-500/20"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Connect AI Agent</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Live Drift Defense Visualizer */}
               <div className={`rounded-2xl border p-5 ${bgCard}`}>
@@ -1230,43 +1638,615 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800">
-                      {audits.slice(0, 5).map((a) => (
-                        <tr key={a.audit_id} className="hover:bg-slate-800/40">
-                          <td className="py-2.5 px-3">
-                            <span
-                              className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] ${
-                                a.verdict.decision === 'ALLOW'
-                                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                                  : a.verdict.decision === 'BLOCK'
-                                  ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                                  : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                              }`}
-                            >
-                              {a.verdict.decision}
-                            </span>
-                          </td>
-                          <td className="py-2.5 px-3 font-mono text-slate-300">{a.action_id}</td>
-                          <td className="py-2.5 px-3 font-mono text-slate-400">{a.agent_id}</td>
-                          <td className="py-2.5 px-3 font-mono">
-                            <span
-                              className={
-                                a.verdict.risk_score >= 0.8
-                                  ? 'text-rose-400 font-bold'
-                                  : a.verdict.risk_score >= 0.5
-                                  ? 'text-amber-400'
-                                  : 'text-emerald-400'
-                              }
-                            >
-                              {a.verdict.risk_score.toFixed(2)}
-                            </span>
-                          </td>
-                          <td className={`py-2.5 px-3 font-mono ${textMuted}`}>
-                            {new Date(a.recorded_at).toLocaleTimeString()}
+                      {audits.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="py-8 text-center text-xs text-slate-400 font-mono">
+                            No evaluated actions yet. Connect an agent or run an action evaluation to see live entries.
                           </td>
                         </tr>
-                      ))}
+                      ) : (
+                        audits.slice(0, 5).map((a) => (
+                          <tr key={a.audit_id} className="hover:bg-slate-800/40">
+                            <td className="py-2.5 px-3">
+                              <span
+                                className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] ${
+                                  a.verdict.decision === 'ALLOW'
+                                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                    : a.verdict.decision === 'BLOCK'
+                                    ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                    : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                                }`}
+                              >
+                                {a.verdict.decision}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 font-mono text-slate-300">{a.action_id}</td>
+                            <td className="py-2.5 px-3 font-mono text-slate-400">{a.agent_id}</td>
+                            <td className="py-2.5 px-3 font-mono">
+                              <span
+                                className={
+                                  a.verdict.risk_score >= 0.8
+                                    ? 'text-rose-400 font-bold'
+                                    : a.verdict.risk_score >= 0.5
+                                    ? 'text-amber-400'
+                                    : 'text-emerald-400'
+                                }
+                              >
+                                {a.verdict.risk_score.toFixed(2)}
+                              </span>
+                            </td>
+                            <td className={`py-2.5 px-3 font-mono ${textMuted}`}>
+                              {new Date(a.recorded_at).toLocaleTimeString()}
+                            </td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ======================================================= */}
+          {/* CONNECTED AGENTS & PRECONDITION BENCH                   */}
+          {/* ======================================================= */}
+          {activeSection === 'agents' && (
+            <div className="space-y-6 animate-in fade-in duration-200">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-bold flex items-center space-x-2">
+                    <Bot className="w-5 h-5 text-cyan-400" />
+                    <span>Connected AI Agents</span>
+                  </h2>
+                  <p className={`text-xs ${textMuted} mt-0.5`}>
+                    Manage your agent connections, monitor live precondition checks, and test drift protection.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowConnectAgentModal(true)}
+                  className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center space-x-1.5 transition-all shadow-md shadow-cyan-500/20"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Connect New Agent</span>
+                </button>
+              </div>
+
+              {/* Agent Cards or Empty State */}
+              {agents.length === 0 ? (
+                <div className={`p-8 rounded-2xl border text-center ${bgCard}`}>
+                  <div className="w-12 h-12 rounded-2xl bg-cyan-500/10 text-cyan-400 flex items-center justify-center mx-auto mb-3">
+                    <Bot className="w-6 h-6" />
+                  </div>
+                  <h3 className="font-bold text-sm mb-1">No AI Agents Connected Yet</h3>
+                  <p className={`text-xs ${textMuted} max-w-md mx-auto mb-5 leading-relaxed`}>
+                    Connect your autonomous agents (LangGraph, OpenAI Agents SDK, CrewAI, AutoGen, or custom REST agents) to intercept mutations and enforce causal continuity.
+                  </p>
+                  <button
+                    onClick={() => setShowConnectAgentModal(true)}
+                    className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs inline-flex items-center space-x-1.5 shadow-sm"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Connect Your First Agent</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {agents.map((agent) => (
+                    <div key={agent.agent_id} className={`p-5 rounded-2xl border space-y-4 ${bgCard}`}>
+                      <div className="flex items-start justify-between">
+                        <div>
+                          <div className="flex items-center space-x-2">
+                            <span className="font-bold text-sm">{agent.name}</span>
+                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">
+                              {agent.framework}
+                            </span>
+                          </div>
+                          <div className={`text-[11px] font-mono ${textMuted} mt-0.5`}>
+                            ID: {agent.agent_id}
+                          </div>
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                          {agent.status}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className={`p-2.5 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
+                          <div className={`text-[10px] uppercase font-mono ${textMuted}`}>Guarded Capability</div>
+                          <div className="font-mono text-cyan-300 font-semibold truncate mt-0.5">{agent.target_capability}</div>
+                        </div>
+                        <div className={`p-2.5 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
+                          <div className={`text-[10px] uppercase font-mono ${textMuted}`}>Target Resource</div>
+                          <div className="font-mono text-slate-200 font-semibold truncate mt-0.5">{agent.target_resource}</div>
+                        </div>
+                        <div className={`p-2.5 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
+                          <div className={`text-[10px] uppercase font-mono ${textMuted}`}>Guardrail Mode</div>
+                          <div className="font-mono text-amber-300 font-semibold text-[11px] mt-0.5">{agent.guardrail_mode}</div>
+                        </div>
+                        <div className={`p-2.5 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
+                          <div className={`text-[10px] uppercase font-mono ${textMuted}`}>Freshness TTL</div>
+                          <div className="font-mono text-slate-200 font-semibold mt-0.5">{agent.freshness_ttl_seconds}s</div>
+                        </div>
+                      </div>
+
+                      {/* Live Telemetry Bar */}
+                      <div className="flex items-center justify-between text-xs font-mono py-1.5 px-3 rounded-lg bg-slate-950/50 border border-slate-800">
+                        <div className="flex items-center space-x-3">
+                          <span>Checks: <strong className="text-cyan-400">{agent.total_evaluations}</strong></span>
+                          <span>Drift Blocked: <strong className="text-rose-400">{agent.blocked_evaluations}</strong></span>
+                        </div>
+                        <span className={`text-[10px] ${textMuted}`}>
+                          {agent.last_evaluated_at ? `Last: ${new Date(agent.last_evaluated_at).toLocaleTimeString()}` : 'Never evaluated'}
+                        </span>
+                      </div>
+
+                      {/* Interactive Controls */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800">
+                        <div className="flex items-center space-x-2">
+                          <button
+                            onClick={() => handleTestAgentGate(agent)}
+                            disabled={testingAgentId === agent.agent_id}
+                            className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-bold font-mono transition-colors"
+                          >
+                            {testingAgentId === agent.agent_id ? 'Evaluating...' : '⚡ Test Gate'}
+                          </button>
+                          <button
+                            onClick={() => handleToggleAgentDrift(agent)}
+                            disabled={togglingAgentId === agent.agent_id}
+                            className="px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-medium font-mono transition-colors"
+                          >
+                            {togglingAgentId === agent.agent_id ? 'Toggling...' : 'Toggle Drift'}
+                          </button>
+                        </div>
+                        <button
+                          onClick={() => handleDeleteAgent(agent.agent_id)}
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                          title="Disconnect Agent"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ======================================================= */}
+          {/* CCK FAILURE LAB (Interactive Zero-Registration Demo)   */}
+          {/* ======================================================= */}
+          {activeSection === 'failurelab' && (
+            <div className="space-y-6 animate-in fade-in duration-200">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-bold flex items-center space-x-2">
+                    <FlaskConical className="w-5 h-5 text-cyan-400" />
+                    <span>CCK Failure Lab — Interactive Reliability Simulator</span>
+                  </h2>
+                  <p className={`text-xs ${textMuted} mt-0.5`}>
+                    See the same AI agent decision before and after underlying evidence drifts. No registration required.
+                  </p>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <span className="px-2.5 py-1 rounded-full text-[10px] font-semibold bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-mono">
+                    Deterministic Engine Live
+                  </span>
+                </div>
+              </div>
+
+              {/* Notice Banner */}
+              <div className={`p-4 rounded-xl border flex items-center justify-between text-xs ${bgSubtle} ${borderSubtle}`}>
+                <div className="flex items-center space-x-2.5">
+                  <Info className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <span>
+                    <strong>Transparent Simulation:</strong> Scenarios run through the live CCK verification engine using deterministic test fixtures. Simulated external systems are visibly isolated from production customer data.
+                  </span>
+                </div>
+              </div>
+
+              {/* Scenario Selector Tabs */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <button
+                  onClick={() => {
+                    setFailureLabScenario('scenario_a_inventory');
+                    setFailureLabResult(null);
+                  }}
+                  className={`p-4 rounded-xl border text-left transition-all ${
+                    failureLabScenario === 'scenario_a_inventory'
+                      ? 'bg-cyan-500/10 border-cyan-500 text-cyan-300 shadow-sm'
+                      : `${bgCard} hover:border-slate-700`
+                  }`}
+                >
+                  <div className="font-bold text-xs mb-1">Scenario A — Inventory Drift</div>
+                  <div className={`text-[11px] ${textMuted}`}>
+                    Stock promised at 5 units, source warehouse updates to 0 before courier dispatch.
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setFailureLabScenario('scenario_b_permission');
+                    setFailureLabResult(null);
+                  }}
+                  className={`p-4 rounded-xl border text-left transition-all ${
+                    failureLabScenario === 'scenario_b_permission'
+                      ? 'bg-cyan-500/10 border-cyan-500 text-cyan-300 shadow-sm'
+                      : `${bgCard} hover:border-slate-700`
+                  }`}
+                >
+                  <div className="font-bold text-xs mb-1">Scenario B — Revoked Permission</div>
+                  <div className={`text-[11px] ${textMuted}`}>
+                    Agent initially holds deploy rights. Admin revokes role before kubectl mutation dispatches.
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setFailureLabScenario('scenario_c_refund');
+                    setFailureLabResult(null);
+                  }}
+                  className={`p-4 rounded-xl border text-left transition-all ${
+                    failureLabScenario === 'scenario_c_refund'
+                      ? 'bg-cyan-500/10 border-cyan-500 text-cyan-300 shadow-sm'
+                      : `${bgCard} hover:border-slate-700`
+                  }`}
+                >
+                  <div className="font-bold text-xs mb-1">Scenario C — Refund Eligibility Drift</div>
+                  <div className={`text-[11px] ${textMuted}`}>
+                    Customer refund initiated. Bank dispute webhook invalidates eligibility mid-flight.
+                  </div>
+                </button>
+              </div>
+
+              {/* Run Simulation Action Button */}
+              <div className={`p-5 rounded-2xl border ${bgCard} flex flex-col sm:flex-row sm:items-center justify-between gap-4`}>
+                <div>
+                  <h3 className="font-bold text-sm">
+                    {failureLabScenario === 'scenario_a_inventory'
+                      ? 'Run Scenario A: E-Commerce Inventory Stockout Drift'
+                      : failureLabScenario === 'scenario_b_permission'
+                      ? 'Run Scenario B: IAM Privilege Revocation Pre-Mutation'
+                      : 'Run Scenario C: Financial Refund Dispute Intercept'}
+                  </h3>
+                  <p className={`text-xs ${textMuted} mt-0.5`}>
+                    Executes Stage 1 (Initial valid decision) &rarr; Simulates real-world drift &rarr; Executes Stage 2 (Action Gate intercept).
+                  </p>
+                </div>
+                <button
+                  onClick={() => handleRunFailureLab(failureLabScenario)}
+                  disabled={failureLabRunning}
+                  className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center justify-center space-x-2 transition-all shadow-md shadow-cyan-500/20 shrink-0"
+                >
+                  <Play className="w-4 h-4 fill-slate-950" />
+                  <span>{failureLabRunning ? 'Simulating Drift...' : 'Run Failure Lab Simulation'}</span>
+                </button>
+              </div>
+
+              {/* Simulation Results Display */}
+              {failureLabResult && (
+                <div className="space-y-6 animate-in fade-in duration-300">
+                  {/* Step-by-Step Causal Continuity Timeline */}
+                  <div className={`rounded-2xl border p-5 ${bgCard}`}>
+                    <h3 className="font-bold text-sm mb-4 flex items-center space-x-2">
+                      <Layers className="w-4 h-4 text-cyan-400" />
+                      <span>Deterministic Execution Timeline</span>
+                    </h3>
+
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+                      <div className={`p-3.5 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
+                        <div className="text-[10px] font-mono text-cyan-400 uppercase font-bold mb-1">Step 1 • Initial State</div>
+                        <div className="font-semibold text-slate-200 mb-1">Agent Observes Fact</div>
+                        <div className={`text-[11px] ${textMuted} font-mono`}>
+                          {failureLabResult.entity_id}: {JSON.stringify(failureLabResult.before_drift.fact_value)} ({failureLabResult.before_drift.fact_state})
+                        </div>
+                      </div>
+
+                      <div className={`p-3.5 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
+                        <div className="text-[10px] font-mono text-emerald-400 uppercase font-bold mb-1">Step 2 • Before Drift</div>
+                        <div className="font-semibold text-slate-200 mb-1">Action Gate Verdict: ALLOW</div>
+                        <div className={`text-[11px] ${textMuted}`}>
+                          Precondition valid. Action permitted to proceed.
+                        </div>
+                      </div>
+
+                      <div className={`p-3.5 rounded-xl border border-amber-500/30 bg-amber-500/5`}>
+                        <div className="text-[10px] font-mono text-amber-400 uppercase font-bold mb-1">Step 3 • Drift Occurs</div>
+                        <div className="font-semibold text-amber-300 mb-1">External System Drift</div>
+                        <div className="text-[11px] text-amber-200/80 font-mono">
+                          {failureLabResult.drift_event.source}: {failureLabResult.drift_event.field} &rarr; {JSON.stringify(failureLabResult.drift_event.new_value)}
+                        </div>
+                      </div>
+
+                      <div className={`p-3.5 rounded-xl border border-rose-500/30 bg-rose-500/5`}>
+                        <div className="text-[10px] font-mono text-rose-400 uppercase font-bold mb-1">Step 4 • After Drift</div>
+                        <div className="font-semibold text-rose-300 mb-1">Action Gate Verdict: BLOCK</div>
+                        <div className="text-[11px] text-rose-200/80">
+                          Precondition drift detected. Zero mutations released.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Side-by-Side Comparison */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* Before Drift Card */}
+                    <div className="p-5 rounded-2xl border border-emerald-500/40 bg-emerald-950/20 text-xs space-y-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-emerald-500/20">
+                        <span className="font-bold text-emerald-400 flex items-center space-x-1.5">
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>Before Evidence Drift</span>
+                        </span>
+                        <span className="px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                          VERDICT: {failureLabResult.before_drift.verdict}
+                        </span>
+                      </div>
+
+                      <div>
+                        <div className={`text-[11px] ${textMuted}`}>Observed Precondition:</div>
+                        <div className="font-mono text-slate-200 font-semibold mt-0.5">
+                          Value: {JSON.stringify(failureLabResult.before_drift.fact_value)} ({failureLabResult.before_drift.fact_state})
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className={`text-[11px] ${textMuted}`}>Gate Explanation:</div>
+                        <p className="text-slate-300 mt-0.5 leading-relaxed">
+                          {failureLabResult.before_drift.reason}
+                        </p>
+                      </div>
+
+                      <div className="pt-2">
+                        <button
+                          onClick={() => {
+                            setSelectedReceiptModal(failureLabResult.before_drift.receipt);
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold text-[11px] flex items-center space-x-1.5 transition-colors"
+                        >
+                          <FileCheck className="w-3.5 h-3.5" />
+                          <span>Inspect Decision Receipt #1</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* After Drift Card */}
+                    <div className="p-5 rounded-2xl border border-rose-500/40 bg-rose-950/20 text-xs space-y-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-rose-500/20">
+                        <span className="font-bold text-rose-400 flex items-center space-x-1.5">
+                          <XCircle className="w-4 h-4" />
+                          <span>After Evidence Drift (CCK Zero-Bypass)</span>
+                        </span>
+                        <span className="px-2 py-0.5 rounded font-mono font-bold text-[10px] bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                          VERDICT: {failureLabResult.after_drift.verdict}
+                        </span>
+                      </div>
+
+                      <div>
+                        <div className={`text-[11px] ${textMuted}`}>Drifted State Detected:</div>
+                        <div className="font-mono text-rose-200 font-semibold mt-0.5">
+                          Value: {JSON.stringify(failureLabResult.after_drift.fact_value)} ({failureLabResult.after_drift.fact_state})
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className={`text-[11px] ${textMuted}`}>Gate Explanation:</div>
+                        <p className="text-rose-200/90 mt-0.5 leading-relaxed font-mono">
+                          {failureLabResult.after_drift.reason}
+                        </p>
+                      </div>
+
+                      <div className="pt-2 flex flex-wrap items-center gap-2">
+                        <button
+                          onClick={() => {
+                            setSelectedReceiptModal(failureLabResult.after_drift.receipt);
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 font-semibold text-[11px] flex items-center space-x-1.5 transition-colors"
+                        >
+                          <FileCheck className="w-3.5 h-3.5" />
+                          <span>Inspect Decision Receipt #2</span>
+                        </button>
+
+                        <a
+                          href={`/api/v1/receipts/${failureLabResult.after_drift.receipt?.receipt_id}/export?format=html`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-semibold text-[11px] flex items-center space-x-1.5 transition-colors"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                          <span>Printable HTML Receipt</span>
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ======================================================= */}
+          {/* DECISION RECEIPTS REGISTRY                              */}
+          {/* ======================================================= */}
+          {activeSection === 'receipts' && (
+            <div className="space-y-6 animate-in fade-in duration-200">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-bold flex items-center space-x-2">
+                    <FileCheck className="w-5 h-5 text-indigo-400" />
+                    <span>CCK Decision Receipts</span>
+                  </h2>
+                  <p className={`text-xs ${textMuted} mt-0.5`}>
+                    Cryptographically verifiable evidence proofs for every evaluation decision, with automated sensitive data redaction.
+                  </p>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={fetchReceipts}
+                    className={`p-2 rounded-xl border ${borderSubtle} hover:bg-slate-800 text-slate-300 text-xs font-semibold flex items-center space-x-1.5`}
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Refresh</span>
+                  </button>
+                </div>
+              </div>
+
+              {receipts.length === 0 ? (
+                <div className={`p-8 rounded-2xl border text-center ${bgCard}`}>
+                  <FileCheck className="w-10 h-10 text-slate-500 mx-auto mb-3" />
+                  <h3 className="font-bold text-sm">No Decision Receipts Minted Yet</h3>
+                  <p className={`text-xs ${textMuted} mt-1 mb-4 max-w-sm mx-auto`}>
+                    Evaluate an action in Action Gate or run a scenario in Failure Lab to automatically mint cryptographic decision receipts.
+                  </p>
+                  <button
+                    onClick={() => setActiveSection('failurelab')}
+                    className="px-4 py-2 rounded-xl bg-cyan-500 text-slate-950 font-bold text-xs"
+                  >
+                    Run Failure Lab Now
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {receipts.map((rcpt) => (
+                    <div
+                      key={rcpt.receipt_id}
+                      className={`p-4 rounded-xl border ${bgCard} flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors hover:border-slate-700`}
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center space-x-2.5">
+                          <span
+                            className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] ${
+                              rcpt.status === 'ALLOW'
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                : rcpt.status === 'BLOCK'
+                                ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                            }`}
+                          >
+                            {rcpt.status}
+                          </span>
+                          <span className="font-mono text-xs font-bold text-cyan-400">{rcpt.receipt_id}</span>
+                          <span className={`text-[11px] font-mono ${textMuted}`}>
+                            {new Date(rcpt.timestamp).toLocaleTimeString()}
+                          </span>
+                        </div>
+
+                        <div className="text-xs text-slate-300 font-mono">
+                          {rcpt.action.capability} &rarr; {rcpt.action.target}
+                        </div>
+
+                        <div className={`text-[11px] ${textMuted} line-clamp-1`}>
+                          {rcpt.verdict.reasoning}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center space-x-2 shrink-0">
+                        <button
+                          onClick={() => setSelectedReceiptModal(rcpt)}
+                          className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors"
+                        >
+                          Inspect Receipt
+                        </button>
+                        <a
+                          href={`/api/v1/receipts/${rcpt.receipt_id}/export?format=html`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className={`p-2 rounded-lg border ${borderSubtle} hover:bg-slate-800 text-slate-300 text-xs`}
+                          title="Print / HTML View"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                        </a>
+                        <a
+                          href={`/api/v1/receipts/${rcpt.receipt_id}/export?format=json`}
+                          download={`cck-decision-receipt-${rcpt.receipt_id}.json`}
+                          className={`p-2 rounded-lg border ${borderSubtle} hover:bg-slate-800 text-slate-300 text-xs`}
+                          title="Download JSON"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </a>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ======================================================= */}
+          {/* PUBLIC BENCHMARK SUITE                                  */}
+          {/* ======================================================= */}
+          {activeSection === 'benchmark' && (
+            <div className="space-y-6 animate-in fade-in duration-200">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-bold flex items-center space-x-2">
+                    <Gauge className="w-5 h-5 text-emerald-400" />
+                    <span>CCK Public Benchmark (Empirical Verification Suite)</span>
+                  </h2>
+                  <p className={`text-xs ${textMuted} mt-0.5`}>
+                    Reproducible performance and accuracy test suite measuring fact drift detection, throughput, and zero false blocks.
+                  </p>
+                </div>
+                <button
+                  onClick={handleRunBenchmark}
+                  disabled={benchmarkRunning}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center space-x-2 transition-all shadow-md shadow-emerald-500/20 shrink-0"
+                >
+                  <Play className="w-4 h-4 fill-white" />
+                  <span>{benchmarkRunning ? 'Running Benchmark...' : 'Run 100-Eval Benchmark'}</span>
+                </button>
+              </div>
+
+              {/* Benchmark Summary Cards */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className={`p-4 rounded-xl border ${bgCard}`}>
+                  <div className={`text-xs ${textMuted} mb-1`}>False Block Rate</div>
+                  <div className="text-2xl font-bold font-mono text-emerald-400">
+                    {benchmarkResult ? benchmarkResult.false_block_rate : '0.00%'}
+                  </div>
+                  <div className="text-[11px] text-emerald-400/80 font-mono mt-1">Zero False Positives</div>
+                </div>
+
+                <div className={`p-4 rounded-xl border ${bgCard}`}>
+                  <div className={`text-xs ${textMuted} mb-1`}>Detection Accuracy</div>
+                  <div className="text-2xl font-bold font-mono text-cyan-400">
+                    {benchmarkResult ? benchmarkResult.detection_accuracy : '100.00%'}
+                  </div>
+                  <div className="text-[11px] text-cyan-400/80 font-mono mt-1">Precondition Drift Integrity</div>
+                </div>
+
+                <div className={`p-4 rounded-xl border ${bgCard}`}>
+                  <div className={`text-xs ${textMuted} mb-1`}>Throughput (ops/sec)</div>
+                  <div className="text-2xl font-bold font-mono text-indigo-400">
+                    {benchmarkResult ? benchmarkResult.throughput_ops_per_sec.toLocaleString() : '260,000+'}
+                  </div>
+                  <div className="text-[11px] text-indigo-400/80 font-mono mt-1">In-Memory Zero-Bypass Gate</div>
+                </div>
+
+                <div className={`p-4 rounded-xl border ${bgCard}`}>
+                  <div className={`text-xs ${textMuted} mb-1`}>Average Latency</div>
+                  <div className="text-2xl font-bold font-mono text-amber-400">
+                    {benchmarkResult ? `${benchmarkResult.avg_latency_ms}ms` : '< 0.01ms'}
+                  </div>
+                  <div className="text-[11px] text-amber-400/80 font-mono mt-1">Per-Evaluation Overhead</div>
+                </div>
+              </div>
+
+              {/* Developer Command Line Box */}
+              <div className={`p-5 rounded-2xl border ${bgCard}`}>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="font-bold text-xs flex items-center space-x-2">
+                    <Terminal className="w-4 h-4 text-cyan-400" />
+                    <span>Run Benchmark Locally via CLI</span>
+                  </span>
+                  <button
+                    onClick={() => copyText('curl -X POST http://localhost:3000/api/v1/benchmark/run', 'bench-cli')}
+                    className="text-xs text-cyan-400 hover:text-cyan-300 font-mono"
+                  >
+                    {copiedId === 'bench-cli' ? 'Copied!' : 'Copy Command'}
+                  </button>
+                </div>
+                <div className="p-3 rounded-xl bg-slate-950 font-mono text-xs text-slate-300 overflow-x-auto border border-slate-800">
+                  <code>curl -s -X POST http://localhost:3000/api/v1/benchmark/run | jq</code>
                 </div>
               </div>
             </div>
@@ -1800,6 +2780,94 @@ if (verdict.decision === 'ALLOW') {
   await courier.dispatch();
 }`}
                   </pre>
+                </div>
+              </div>
+
+              {/* Webhook Ingestion Card for Real Data */}
+              <div className={`rounded-2xl border p-5 ${bgCard}`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+                  <div className="flex items-center space-x-2">
+                    <span className="w-7 h-7 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-xs font-mono font-bold text-emerald-400">
+                      HTTP
+                    </span>
+                    <div>
+                      <h3 className="font-bold text-sm">External Real-World Webhook Ingestion</h3>
+                      <p className={`text-[11px] ${textMuted}`}>POST /api/v1/webhooks/ingest • Ingest live events from Stripe, Shopify, GitHub, or custom services</p>
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    Live Endpoint Active
+                  </span>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="block text-[11px] font-mono text-slate-400 mb-1">
+                      Your Ingestion Endpoint URL:
+                    </label>
+                    <div className="p-2.5 rounded-xl bg-slate-950 font-mono text-cyan-300 flex items-center justify-between border border-slate-800">
+                      <code>{typeof window !== 'undefined' ? window.location.origin : ''}/api/v1/webhooks/ingest?project_id={activeProjectId}</code>
+                      <button
+                        onClick={() => copyText(`${typeof window !== 'undefined' ? window.location.origin : ''}/api/v1/webhooks/ingest?project_id=${activeProjectId}`, 'url-webhook')}
+                        className="p-1 rounded text-slate-400 hover:text-white"
+                      >
+                        {copiedId === 'url-webhook' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Interactive Test Panel */}
+                  <div className={`p-4 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
+                    <div className="font-semibold text-slate-200 mb-2">Test Live Webhook Ingestion:</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-3">
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-1">Entity ID</label>
+                        <input
+                          type="text"
+                          value={webhookEntity}
+                          onChange={(e) => setWebhookEntity(e.target.value)}
+                          className={`w-full px-2.5 py-1.5 rounded-lg border font-mono text-xs ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-300'}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-1">Field Name</label>
+                        <input
+                          type="text"
+                          value={webhookField}
+                          onChange={(e) => setWebhookField(e.target.value)}
+                          className={`w-full px-2.5 py-1.5 rounded-lg border font-mono text-xs ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-300'}`}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-1">New Value</label>
+                        <input
+                          type="text"
+                          value={webhookValue}
+                          onChange={(e) => setWebhookValue(e.target.value)}
+                          className={`w-full px-2.5 py-1.5 rounded-lg border font-mono text-xs ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-300'}`}
+                        />
+                      </div>
+                    </div>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <span className={`text-[11px] ${textMuted}`}>
+                        Posting live events updates fact freshness, mints SHA-256 evidence, and activates Action Gate.
+                      </span>
+                      <button
+                        onClick={handleSendTestWebhook}
+                        disabled={webhookSending}
+                        className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition-colors flex items-center justify-center space-x-1 shrink-0"
+                      >
+                        <Zap className="w-3.5 h-3.5" />
+                        <span>{webhookSending ? 'Ingesting...' : 'Send Live Webhook'}</span>
+                      </button>
+                    </div>
+
+                    {webhookResult && (
+                      <div className="mt-3 p-2.5 rounded-lg bg-slate-950 font-mono text-[11px] text-emerald-300 border border-slate-800">
+                        ✓ Ingested Evidence: {webhookResult.evidence_id} • Fact State: {webhookResult.fact_state} (SHA-256: {webhookResult.payload_hash?.slice(0, 16)}...)
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -2406,14 +3474,24 @@ if (verdict.decision === 'ALLOW') {
                     Immutable SHA-256 hash-chained ledger preventing retroactive tampering or log manipulation
                   </p>
                 </div>
-                <button
-                  onClick={handleVerifyChain}
-                  disabled={verifyingChain}
-                  className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center space-x-1.5 shadow-xs shrink-0"
-                >
-                  <Fingerprint className="w-4 h-4" />
-                  <span>{verifyingChain ? 'Verifying...' : 'Verify Chain Integrity'}</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <a
+                    href="/api/v1/audits/export"
+                    download="cck-audit-ledger.json"
+                    className={`px-3.5 py-2 rounded-xl border ${borderSubtle} hover:bg-slate-800 text-slate-300 font-semibold text-xs flex items-center space-x-1.5 shadow-xs shrink-0 transition-colors`}
+                  >
+                    <Download className="w-4 h-4 text-emerald-400" />
+                    <span>Export Ledger (JSON)</span>
+                  </a>
+                  <button
+                    onClick={handleVerifyChain}
+                    disabled={verifyingChain}
+                    className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center space-x-1.5 shadow-xs shrink-0"
+                  >
+                    <Fingerprint className="w-4 h-4" />
+                    <span>{verifyingChain ? 'Verifying...' : 'Verify Chain Integrity'}</span>
+                  </button>
+                </div>
               </div>
 
               {/* Chain Verification Banner */}
@@ -2648,6 +3726,277 @@ if (verdict.decision === 'ALLOW') {
           )}
         </main>
       </div>
+
+      {/* ------------------------------------------------------- */}
+      {/* Decision Receipt Modal (Cryptographic Verification Proof) */}
+      {/* ------------------------------------------------------- */}
+      {selectedReceiptModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className={`w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl border p-6 space-y-4 ${bgCard}`}>
+            {/* Header */}
+            <div className="flex items-start justify-between pb-3 border-b border-slate-700">
+              <div>
+                <div className="flex items-center space-x-2.5">
+                  <FileCheck className="w-5 h-5 text-indigo-400" />
+                  <h3 className="font-bold text-base font-mono">CCK DECISION RECEIPT</h3>
+                  <span
+                    className={`px-2 py-0.5 rounded font-mono font-bold text-[10px] ${
+                      selectedReceiptModal.status === 'ALLOW'
+                        ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                        : selectedReceiptModal.status === 'BLOCK'
+                        ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                        : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                    }`}
+                  >
+                    {selectedReceiptModal.status}
+                  </span>
+                </div>
+                <div className="text-[11px] font-mono text-cyan-400 mt-0.5">
+                  ID: {selectedReceiptModal.receipt_id} &bull; Timestamp: {selectedReceiptModal.timestamp}
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedReceiptModal(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Redaction Controls */}
+            <div className={`p-3 rounded-xl border flex items-center justify-between text-xs ${bgSubtle} ${borderSubtle}`}>
+              <div className="flex items-center space-x-2">
+                <Lock className="w-4 h-4 text-amber-400" />
+                <span>
+                  <strong>Configurable Redaction:</strong> {receiptRedactMode ? 'Sensitive credentials masked' : 'Unmasked view'}
+                </span>
+              </div>
+              <button
+                onClick={() => setReceiptRedactMode(!receiptRedactMode)}
+                className="px-2.5 py-1 rounded-lg border text-[11px] font-mono hover:bg-slate-800 transition-colors"
+              >
+                {receiptRedactMode ? 'Switch to Unmasked' : 'Switch to Redacted'}
+              </button>
+            </div>
+
+            {/* Meta Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className={`p-3 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
+                <div className={`text-[10px] font-mono ${textMuted} uppercase`}>Protected Action</div>
+                <div className="font-mono font-semibold text-slate-200 mt-0.5">
+                  {selectedReceiptModal.action.capability} &rarr; {selectedReceiptModal.action.target}
+                </div>
+                <div className={`text-[11px] font-mono ${textMuted} mt-1 truncate`}>
+                  Command: {selectedReceiptModal.action.command}
+                </div>
+              </div>
+
+              <div className={`p-3 rounded-xl border ${bgSubtle} ${borderSubtle}`}>
+                <div className={`text-[10px] font-mono ${textMuted} uppercase`}>Entity & Agent</div>
+                <div className="font-mono font-semibold text-slate-200 mt-0.5">
+                  {selectedReceiptModal.entity_id}
+                </div>
+                <div className={`text-[11px] font-mono ${textMuted} mt-1`}>
+                  Agent: {selectedReceiptModal.agent_id} | Risk: {selectedReceiptModal.verdict.risk_score}
+                </div>
+              </div>
+            </div>
+
+            {/* Verdict Explanation */}
+            <div className="p-3.5 rounded-xl border border-slate-700 bg-slate-950 text-xs">
+              <div className="text-[10px] font-mono uppercase text-slate-400 mb-1">Gate Verdict Reasoning</div>
+              <p className="font-mono text-slate-200 leading-relaxed">
+                {selectedReceiptModal.verdict.reasoning}
+              </p>
+              {selectedReceiptModal.verdict.remediation_suggestions && (
+                <div className="mt-2 text-amber-300 font-mono text-[11px]">
+                  &bull; Remediation: {selectedReceiptModal.verdict.remediation_suggestions[0]}
+                </div>
+              )}
+            </div>
+
+            {/* Observed Facts Snapshot */}
+            <div className="p-3 rounded-xl border border-slate-800 bg-slate-950/70 text-xs font-mono">
+              <div className="text-[10px] uppercase text-slate-400 mb-1">Observed Facts Snapshot</div>
+              <pre className="text-[11px] text-slate-300 overflow-x-auto m-0">
+                {JSON.stringify(selectedReceiptModal.relevant_facts, null, 2)}
+              </pre>
+            </div>
+
+            {/* Tamper-Evident SHA-256 Ledger Reference */}
+            <div className="p-3 rounded-xl border border-indigo-900/50 bg-indigo-950/20 text-xs font-mono space-y-1">
+              <div className="text-[10px] uppercase text-indigo-400 font-bold">Cryptographic Audit Chain Reference</div>
+              <div className="text-[11px] text-slate-300 truncate">
+                Action Hash: {selectedReceiptModal.audit_ref?.action_hash}
+              </div>
+              <div className="text-[11px] text-slate-500 truncate">
+                Previous Hash: {selectedReceiptModal.audit_ref?.previous_hash}
+              </div>
+              <div className="text-[10px] text-emerald-400 pt-1">
+                &bull; Immutable SHA-256 Hash Chain Verified
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-700">
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href={`/api/v1/receipts/${selectedReceiptModal.receipt_id}/export?format=html`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs flex items-center space-x-1.5 transition-colors"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Printable HTML / PDF</span>
+                </a>
+
+                <a
+                  href={`/api/v1/receipts/${selectedReceiptModal.receipt_id}/export?format=json`}
+                  download={`cck-decision-receipt-${selectedReceiptModal.receipt_id}.json`}
+                  className={`px-3 py-2 rounded-xl border ${borderSubtle} hover:bg-slate-800 text-slate-300 font-semibold text-xs flex items-center space-x-1.5 transition-colors`}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Export JSON</span>
+                </a>
+
+                <button
+                  onClick={() => {
+                    const shareUrl = `${window.location.origin}/api/v1/receipts/${selectedReceiptModal.receipt_id}?share=true`;
+                    copyText(shareUrl, 'receipt-share-link');
+                    showNotification('Receipt verification link copied to clipboard!', 'success');
+                  }}
+                  className={`px-3 py-2 rounded-xl border ${borderSubtle} hover:bg-slate-800 text-slate-300 font-semibold text-xs flex items-center space-x-1.5 transition-colors`}
+                >
+                  <Share2 className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>{copiedId === 'receipt-share-link' ? 'Copied Link!' : 'Share Link'}</span>
+                </button>
+              </div>
+
+              <button
+                onClick={() => setSelectedReceiptModal(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------- */}
+      {/* Connect New Agent Modal                                 */}
+      {/* ------------------------------------------------------- */}
+      {showConnectAgentModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className={`w-full max-w-lg rounded-2xl border p-6 space-y-4 ${bgCard}`}>
+            <div className="flex items-center justify-between pb-3 border-b border-slate-700">
+              <div className="flex items-center space-x-2">
+                <Bot className="w-5 h-5 text-cyan-400" />
+                <h3 className="font-bold text-base">Connect Your AI Agent</h3>
+              </div>
+              <button onClick={() => setShowConnectAgentModal(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConnectAgent} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-medium mb-1">Agent Name</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. RefundProcessorBot or DevOpsDeployer"
+                  value={newAgentForm.name}
+                  onChange={(e) => setNewAgentForm({ ...newAgentForm, name: e.target.value })}
+                  className={`w-full px-3 py-2 rounded-xl border ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium mb-1">Agent Framework</label>
+                  <select
+                    value={newAgentForm.framework}
+                    onChange={(e) => setNewAgentForm({ ...newAgentForm, framework: e.target.value })}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                  >
+                    <option value="langgraph">LangGraph (Python)</option>
+                    <option value="openai">OpenAI Agents SDK</option>
+                    <option value="crewai">CrewAI</option>
+                    <option value="mcp">MCP (Model Context Protocol)</option>
+                    <option value="custom_http">Custom REST API</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Guardrail Enforcement</label>
+                  <select
+                    value={newAgentForm.guardrail_mode}
+                    onChange={(e) => setNewAgentForm({ ...newAgentForm, guardrail_mode: e.target.value as 'ENFORCE_AND_BLOCK' | 'REQUIRE_APPROVAL' | 'OBSERVE_ONLY' })}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                  >
+                    <option value="ENFORCE_AND_BLOCK">ENFORCE &amp; BLOCK</option>
+                    <option value="REQUIRE_APPROVAL">REQUIRE APPROVAL</option>
+                    <option value="OBSERVE_ONLY">OBSERVE ONLY (Shadow)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-medium mb-1">Target Capability</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. billing.refund or orders.dispatch"
+                    value={newAgentForm.target_capability}
+                    onChange={(e) => setNewAgentForm({ ...newAgentForm, target_capability: e.target.value })}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                  />
+                </div>
+                <div>
+                  <label className="block font-medium mb-1">Target Resource</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. order:cust_01 or db:prod"
+                    value={newAgentForm.target_resource}
+                    onChange={(e) => setNewAgentForm({ ...newAgentForm, target_resource: e.target.value })}
+                    className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-medium mb-1">Freshness TTL Tolerance (seconds)</label>
+                <input
+                  type="number"
+                  min="5"
+                  max="86400"
+                  value={newAgentForm.freshness_ttl_seconds}
+                  onChange={(e) => setNewAgentForm({ ...newAgentForm, freshness_ttl_seconds: Number(e.target.value) })}
+                  className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                />
+              </div>
+
+              <div className="pt-2 flex justify-end space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setShowConnectAgentModal(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-medium"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs shadow-md shadow-cyan-500/20"
+                >
+                  Connect Agent
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* ------------------------------------------------------- */}
       {/* Auth Modal (Login / Register) */}

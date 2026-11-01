@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "CCK - AI Agent Action Control Platform",
-  "short_name": "CCK Control",
-  "description": "منصة موثوقية وتحكم لأفعال وكلاء الذكاء الاصطناعي الخارجية - Zero-Bypass AI Safety & Reliability Gate",
+  "name": "CCK — Agent Reliability & Causal Continuity Platform",
+  "short_name": "CCK",
+  "description": "Checks whether facts and evidence behind AI agent decisions are still valid before protected actions execute.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

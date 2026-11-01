@@ -33,3 +33,7 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
+# Runtime Data Store
+data/*.json
+!data/.gitkeep
+

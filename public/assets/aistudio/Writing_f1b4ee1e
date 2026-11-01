@@ -1,0 +1,956 @@
+CCK — Full Product Release, Cross-Device Experience, Developer Adoption & Viral Growth Implementation
+
+You are working on the existing CCK GitHub repository:
+
+Repository: https://github.com/ghazghazibahaeddin-arch/cck
+
+Your task is to turn the existing CCK project into a real, publicly releasable product that works across devices, delivers an immediately understandable and demonstrable user value, and includes a genuine product-led growth loop.
+
+This is an implementation task, not a strategy-only exercise.
+
+You must inspect the actual repository, understand the existing architecture, modify the real codebase, run the actual tests, and prepare a release-ready product.
+
+You must not replace the existing CCK engine with a different product or redesign its fundamental purpose.
+
+Do not stop at producing recommendations, mockups, screenshots, landing-page copy, or a roadmap. Implement the work directly in the connected repository wherever access permits.
+
+---
+
+1. PRODUCT IDENTITY — DO NOT CHANGE THE CORE
+
+CCK is an:
+
+Agent Reliability & Causal Continuity Platform.
+
+Its central purpose is to help AI agents avoid executing consequential actions based on outdated, invalid, or changed facts and evidence.
+
+Its core capabilities include the existing project components, such as:
+
+- Fact Registry
+- Evidence Registry
+- Entity Registry
+- Dependency Graph
+- Freshness Engine
+- Action Gate
+- Event Journal
+- Replay and Recovery
+- Contract Registry
+- Policy Engine
+- Audit
+- Runtime
+- REST API
+- CLI
+
+Inspect the repository to establish which of these components actually exist and work.
+
+Preserve working implementations.
+
+Do not replace the reliability engine with a chatbot, ordinary observability dashboard, generic agent framework, or a simple approval system.
+
+Do not remove existing functionality merely to simplify deployment.
+
+The product positioning should communicate this central value:
+
+CCK keeps AI decisions valid as the world changes.
+
+Suggested headline:
+
+"Stop AI agents from acting on decisions built on stale evidence."
+
+Suggested supporting text:
+
+"CCK checks whether the facts and evidence behind an agent's decision are still valid before protected actions are executed."
+
+Use clear, precise English throughout the product.
+
+Do not claim that CCK prevents every AI failure. Clearly communicate that CCK protects the facts, evidence, dependencies, and actions actually connected to its verification system.
+
+---
+
+2. START WITH A REAL REPOSITORY AUDIT
+
+Before changing code:
+
+1. Inspect the entire repository and current Git branch.
+2. Identify the current commit and existing uncommitted changes.
+3. Map the frontend, backend, runtime, core engine, database, tests, SDKs, integrations, deployment configuration, and documentation.
+4. Identify the actual implementation status of every core component.
+5. Run the existing test suite before modifications.
+6. Record the initial build and test results.
+7. Identify unfinished, mocked, disconnected, or misleading functionality.
+
+Create:
+
+"docs/RELEASE_AUDIT.md"
+
+It must document:
+
+- What genuinely works.
+- What is partially implemented.
+- What is missing.
+- What is mocked.
+- Which APIs are functional.
+- Which integrations actually work.
+- Whether data persists across restarts.
+- Whether the action gate is properly enforced.
+- Whether the frontend is connected to real backend functionality.
+- What is required before public release.
+
+Do not assume a component works because its name exists in the repository.
+
+Do not delete existing user data or replace the existing persistence system without a migration and recovery plan.
+
+---
+
+3. MAKE CCK WORK ACROSS DEVICES
+
+Deliver a production-quality responsive web product that works on:
+
+- Desktop browsers.
+- Laptop browsers.
+- Android phones.
+- iPhones.
+- Tablets.
+- Mobile browsers.
+- Installed PWA experiences where supported.
+
+3.1 Responsive interface
+
+Implement and test:
+
+- Mobile-first responsive layouts.
+- Desktop navigation and mobile navigation.
+- Touch-friendly controls.
+- Responsive tables and charts.
+- Readable typography on small screens.
+- Proper spacing and responsive cards.
+- Keyboard accessibility.
+- Screen-reader-friendly labels.
+- Accessible color contrast.
+- Loading, empty, success, warning, and error states.
+- Useful mobile navigation without overflowing or horizontal scrolling.
+
+The main workflows must be usable on narrow mobile screens, not merely displayed there.
+
+3.2 Progressive Web App
+
+Where compatible with the current architecture, implement a proper installable PWA.
+
+Include:
+
+- Web app manifest.
+- Appropriate application icons and sizes.
+- Service worker.
+- Installation support on supported browsers.
+- Theme colors.
+- Correct application metadata.
+- Safe caching strategy.
+- Update handling.
+- Offline fallback for documentation and static resources where practical.
+
+IMPORTANT:
+
+Never execute protected external actions offline.
+
+Never serve stale authorization, stale policy, or stale verification results as proof that an action is currently valid.
+
+If the application cannot contact the verification backend, protected actions must remain blocked or require a safe revalidation path.
+
+Do not advertise the product as a native Android or iOS application. A PWA is not the same as an application published in app stores.
+
+Prepare the architecture and documentation for possible future native applications, but do not introduce unnecessary native wrappers now.
+
+3.3 Device testing
+
+Run actual responsive and browser tests where available.
+
+Report which browsers and device configurations were tested and which were not.
+
+Do not claim universal compatibility without testing.
+
+---
+
+4. BUILD THE MOST IMPORTANT USER EXPERIENCE: CCK FAILURE LAB
+
+This is a priority feature.
+
+The first-time visitor must understand the product within seconds and experience its value without being forced to create an account.
+
+Build a functional interactive experience named:
+
+CCK Failure Lab
+
+It must be accessible directly from the landing page.
+
+It should demonstrate a real sequence:
+
+1. An AI agent receives information.
+2. It makes a decision based on that information.
+3. The underlying facts or evidence change.
+4. The agent attempts a protected action.
+5. CCK evaluates whether the original decision remains valid.
+6. CCK returns the appropriate outcome.
+7. The interface explains exactly why.
+
+Build three deterministic demonstration scenarios:
+
+Scenario A — Inventory or Price Changes
+
+An agent decides to purchase or promise an item using an initial inventory or price value.
+
+The source value changes before execution.
+
+CCK must demonstrate whether the decision requires revalidation or blocking according to the actual configured policy.
+
+Scenario B — Revoked Permission
+
+An agent initially has permission to perform an operation.
+
+That permission is revoked before execution.
+
+CCK must demonstrate how the relevant fact or evidence changes and how the protected action is handled.
+
+Scenario C — Refund Eligibility Changes
+
+An agent decides that an order is eligible for a refund.
+
+The underlying order state changes before the refund is executed.
+
+CCK must evaluate the changed evidence and determine the appropriate action-gate outcome.
+
+IMPORTANT IMPLEMENTATION RULES:
+
+- Connect these scenarios to the actual CCK engine wherever possible.
+- Use deterministic scenario fixtures.
+- Make simulated external systems visibly labeled as simulated.
+- Never present simulated data as live third-party integration data.
+- Do not hardcode the final ALLOW or BLOCK result independently of the engine.
+- Display the evidence, timestamps, dependencies, policy, and evaluation result.
+- Explain why the decision was allowed, blocked, or requires revalidation.
+- Ensure scenarios produce reproducible results.
+- Add automated tests for all scenarios.
+
+The most important experience is:
+
+See the same agent decision before and after its underlying evidence changes.
+
+The user should immediately understand why CCK matters.
+
+No registration should be required for the public demonstration.
+
+---
+
+5. BUILD A REAL CCK DECISION RECEIPT
+
+Create a shareable and exportable artifact called:
+
+CCK Decision Receipt
+
+It should allow a developer to inspect and share the evidence behind a CCK decision.
+
+The receipt should contain, where available:
+
+- Decision identifier.
+- Verification timestamp.
+- Decision status.
+- Action identifier.
+- Related entity identifiers.
+- Relevant facts.
+- Evidence references.
+- Evidence source and timestamps.
+- Dependency information.
+- Freshness assessment.
+- Policy identifier and version.
+- Explanation of the result.
+- Required revalidation or approval.
+- Relevant event or audit references.
+
+Security is mandatory.
+
+The receipt must never expose:
+
+- API secrets.
+- Authentication tokens.
+- Passwords.
+- Private keys.
+- Unnecessary personal information.
+- Confidential external source payloads.
+- Internal customer data.
+
+Implement configurable redaction.
+
+Support:
+
+1. Local JSON export.
+2. Human-readable HTML or PDF export if compatible with the project.
+3. Secure sharing when a safe hosting implementation is available.
+
+For public share links:
+
+- Use unpredictable identifiers or signed access mechanisms.
+- Apply expiration controls.
+- Support revocation.
+- Avoid publishing private evidence by default.
+- Make visibility explicit to the user.
+- Never expose private tenant information through guessable URLs.
+
+A receipt must be traceable to an actual CCK evaluation, not generated from manually written marketing content.
+
+If public sharing cannot be implemented securely within the existing architecture, deliver safe downloadable receipts first and document public sharing as incomplete.
+
+---
+
+6. BUILD A REAL PRODUCT-LED GROWTH LOOP
+
+Do not rely on ordinary promotional posts, advertisements, artificial referral links, or forced branding.
+
+The product itself should make useful results easy to share.
+
+Implement this flow:
+
+DISCOVER → TRY → VERIFY → INTEGRATE → SHARE → TEAM ADOPTION
+
+6.1 Zero-friction discovery
+
+A visitor should be able to:
+
+- Understand the product headline.
+- See a clear real-world problem.
+- Open Failure Lab.
+- Run a demonstration.
+- Inspect the receipt.
+- Read the documentation.
+- Start integration.
+
+Do not require registration before the first successful demonstration.
+
+6.2 Shareable technical results
+
+After a successful demonstration or real verification, provide:
+
+- Shareable decision receipt where safe.
+- Downloadable verification report.
+- Copyable example code.
+- Copyable CLI command.
+- Integration instructions.
+- Link to the exact documentation page.
+
+The sharing action must provide value to the recipient.
+
+Do not automatically share user data.
+
+6.3 GitHub distribution
+
+Prepare CCK for GitHub-based developer adoption.
+
+Where appropriate and technically feasible:
+
+- Add clear GitHub installation instructions.
+- Improve repository documentation.
+- Add runnable examples.
+- Add CI integration instructions.
+- Provide a GitHub Action only if it can perform real useful checks.
+- Generate useful and accurate Pull Request reports.
+- Add contribution guidelines.
+- Add issue and bug-report templates.
+- Add security reporting guidance.
+- Add versioned release notes.
+
+Do not build a decorative GitHub Action that does not call real CCK functionality.
+
+6.4 Public benchmark
+
+Create a reproducible public benchmark or test suite focused on:
+
+- Facts becoming outdated.
+- Evidence becoming invalid.
+- Dependency changes.
+- Decision revalidation.
+- Protected action enforcement.
+- False blocks.
+- Missing evidence.
+- Failure and recovery behavior.
+
+Provide a clear way for developers to run the tests against CCK.
+
+Do not publish unsupported benchmark rankings or performance comparisons against competitors.
+
+Only report measured results.
+
+---
+
+7. INTEGRATIONS — MAKE CCK EASY TO ADOPT
+
+A major product objective is to make CCK accessible from the tools developers already use.
+
+First inspect current implementations.
+
+Build integrations incrementally rather than adding many fake connectors.
+
+Prioritize the following candidates:
+
+Agent frameworks
+
+- LangGraph.
+- OpenAI Agents SDK.
+- CrewAI.
+- Pydantic AI.
+
+Agent interoperability
+
+- MCP server and MCP client capabilities where appropriate.
+
+Automation
+
+- n8n.
+
+Data and external systems
+
+- PostgreSQL.
+- REST APIs.
+- Webhooks.
+- Shopify or Stripe as a potential first real business integration, depending on the existing use case and implementation feasibility.
+
+Developer workflow
+
+- GitHub Actions and Pull Request reporting where useful.
+
+For each integration:
+
+1. Implement actual working code.
+2. Provide installation instructions.
+3. Provide a minimal working example.
+4. Provide a complete example where useful.
+5. Test success and failure cases.
+6. Ensure the integration calls the actual CCK core.
+7. Document supported versions.
+8. State limitations.
+
+An integration is not complete because its logo appears on the website.
+
+Do not claim support for integrations that are not actually implemented and tested.
+
+Prefer two or three excellent integrations over fifteen incomplete integrations.
+
+Build reusable adapters so future integrations do not require changes to the CCK core.
+
+---
+
+8. IMPROVE THE DEVELOPER EXPERIENCE
+
+CCK should be easy to evaluate and integrate.
+
+Inspect and implement where appropriate:
+
+- Python SDK.
+- TypeScript SDK.
+- CLI commands.
+- REST API documentation.
+- API examples.
+- MCP documentation.
+- Quickstart guide.
+- Local development guide.
+- Docker setup.
+- Error reference.
+- Configuration reference.
+- Production deployment guide.
+
+The first useful verification should be achievable with minimal steps.
+
+Provide examples such as:
+
+- Verify an agent decision.
+- Register facts and evidence.
+- Establish dependencies.
+- Revalidate a decision.
+- Gate a protected action.
+- Inspect a decision receipt.
+
+Never invent SDK APIs. The examples must execute against the implemented versions.
+
+Provide both a beginner-friendly quickstart and advanced documentation.
+
+---
+
+9. PRODUCTION SECURITY AND TRUST
+
+This is a reliability product.
+
+The release must not undermine the reliability promise.
+
+Audit and implement, as appropriate:
+
+- Authentication.
+- Authorization.
+- Project isolation.
+- Tenant isolation.
+- Scoped API keys.
+- API key hashing and secure storage.
+- API key rotation and revocation.
+- Rate limiting.
+- Input validation.
+- Request-size limits.
+- Secret management.
+- Secure CORS configuration.
+- CSRF protections when applicable.
+- Secure headers.
+- Audit log protection.
+- Database migrations.
+- Backup and recovery strategy.
+- Error handling.
+- Dependency security checks.
+
+Critically:
+
+If evidence cannot be checked, the source cannot be reached, the policy is unavailable, or the verification engine encounters an internal error, the protected action must not silently proceed.
+
+Implement and test fail-closed behavior.
+
+Support clear outcomes such as:
+
+- ALLOW.
+- BLOCK.
+- REQUIRE_APPROVAL.
+- REVALIDATE.
+
+Never return ALLOW simply because a check timed out or an internal component failed.
+
+Provide explicit and understandable error reasons.
+
+For demonstration and local development, isolated simulated data is acceptable when visibly labeled.
+
+Do not mix demo data and real customer data.
+
+---
+
+10. DATABASE AND DATA PERSISTENCE
+
+Inspect the existing storage architecture first.
+
+Do not introduce a new database simply because it is fashionable.
+
+Preserve the existing architecture where reasonable.
+
+Implement or complete:
+
+- Durable storage.
+- Database migrations.
+- Project isolation.
+- Tenant isolation where applicable.
+- Indexes for important query paths.
+- Data retention controls.
+- Export capabilities.
+- Recovery tests.
+- Migration tests.
+
+A restart must not silently erase real customer data.
+
+If using SQLite, PostgreSQL, or another database, ensure the implementation actually supports the deployment environment.
+
+Do not assume standard local SQLite operations work with Cloudflare D1.
+
+Do not assume the existing FastAPI application automatically runs on Cloudflare Workers.
+
+Evaluate the real Python dependencies and runtime compatibility.
+
+---
+
+11. DEPLOYMENT AND PUBLIC RELEASE
+
+Prepare CCK for an actual public release.
+
+The preferred initial deployment is a zero-monthly-cost or free-tier deployment, provided it is technically safe and compatible with the actual code.
+
+Evaluate the existing project against:
+
+- Cloudflare Workers and Pages.
+- Cloudflare D1 if compatible.
+- Other genuinely free deployment alternatives when necessary.
+
+Do not force an unsuitable hosting architecture.
+
+Do not:
+
+- Create paid resources.
+- Add billing details.
+- Purchase domains.
+- Activate paid subscriptions.
+- Store payment credentials.
+- Replace the production database without a safe migration.
+- Expose secrets in source code.
+- Claim successful deployment without a verified live URL.
+
+Implement:
+
+- Production build configuration.
+- Environment variable documentation.
+- Health checks.
+- Deployment instructions.
+- Database migration procedure.
+- Rollback procedure.
+- Backup and recovery instructions.
+- Release versioning.
+- Deployment verification.
+
+If deployment requires user credentials or authorization, prepare all code and configuration possible, then clearly identify the exact manual step.
+
+Do not invent deployment success.
+
+---
+
+12. HOMEPAGE AND PRODUCT PRESENTATION
+
+Build a professional, fast, responsive English-language homepage.
+
+It should communicate the product's value quickly.
+
+Suggested structure:
+
+Hero
+
+CCK
+
+"Keep AI decisions valid as the world changes."
+
+"Verify the facts and evidence behind agent decisions before protected actions execute."
+
+Primary CTA:
+
+"Try the Failure Lab"
+
+Secondary CTA:
+
+"Build with CCK"
+
+The problem
+
+Show the danger of an agent acting on information that has changed.
+
+The solution
+
+Demonstrate evidence, dependencies, revalidation, and action gating.
+
+Interactive demonstration
+
+Embed the actual CCK Failure Lab.
+
+How it works
+
+Show the real architecture at an understandable level.
+
+Integrations
+
+Display only integrations actually supported and tested.
+
+Developer adoption
+
+Show SDKs, CLI, API, MCP, and examples according to their real implementation status.
+
+Trust and transparency
+
+Explain what CCK can verify, what it cannot verify, and how it behaves when information is unavailable.
+
+Documentation
+
+Provide direct links to quickstart and API documentation.
+
+Final CTA
+
+"Run your first verification."
+
+Do not make unsupported claims such as:
+
+- Prevents all AI failures.
+- Guarantees perfect decisions.
+- Zero risk.
+- Fully autonomous safety.
+- Production-ready at any scale.
+
+Use clear, evidence-based messaging.
+
+Avoid generic marketing paragraphs and exaggerated promises.
+
+---
+
+13. MEASUREMENT AND PRODUCT ANALYTICS
+
+Implement a privacy-respecting way to understand adoption.
+
+Do not introduce invasive tracking.
+
+Provide opt-in telemetry or privacy-safe aggregate metrics where appropriate.
+
+Measure:
+
+- Failure Lab starts.
+- Successful demonstration completions.
+- First successful real verification.
+- SDK installations where measurable.
+- Integrations configured.
+- Projects with repeated usage.
+- Decision receipts exported.
+- Share-link usage if sharing is implemented.
+- Verification latency.
+- Action-gate outcomes.
+- Revalidation frequency.
+- False-block incidents.
+- Verification errors.
+
+Clearly distinguish:
+
+- Demo executions.
+- Real customer executions.
+- Local runs.
+- Cloud runs.
+
+Do not inflate usage counts by mixing demonstration traffic with actual customer workloads.
+
+Provide a minimal internal dashboard or documented metrics endpoint only if it is useful and secure.
+
+---
+
+14. RELEASE AND VERSIONING
+
+Prepare a real release, not an unfinished development snapshot.
+
+Include:
+
+- Version number using an appropriate versioning scheme.
+- CHANGELOG.
+- Release notes.
+- Updated README.
+- Installation instructions.
+- Quickstart.
+- Supported platforms.
+- Known limitations.
+- Security policy.
+- License review.
+- Contribution guidance.
+- GitHub release preparation.
+- Release tag when authorized and appropriate.
+
+Ensure all public-facing documentation matches actual product behavior.
+
+Do not publish a release that claims unavailable capabilities.
+
+---
+
+15. TESTING AND ACCEPTANCE CRITERIA
+
+Run the existing test suite before and after implementation.
+
+Add meaningful automated tests.
+
+At a minimum, validate the following end-to-end workflow:
+
+1. Create or load a test entity.
+2. Register facts.
+3. Register evidence.
+4. Establish dependencies.
+5. Make a decision.
+6. Change an underlying fact or evidence source.
+7. Revalidate the decision.
+8. Attempt a protected action.
+9. Verify the correct action-gate outcome.
+10. Inspect the audit/event history.
+11. Generate a valid decision receipt.
+12. Export the receipt.
+13. Verify that redaction works.
+14. Verify that tenant isolation works.
+15. Verify that a backend failure cannot silently authorize a protected action.
+
+Also test:
+
+- Desktop layout.
+- Mobile layout.
+- Tablet layout.
+- PWA installation where possible.
+- Offline safety behavior.
+- API errors.
+- Invalid evidence.
+- Missing evidence.
+- Expired evidence.
+- Changed policies.
+- Dependency changes.
+- Concurrency where applicable.
+- Rate limits.
+- Data persistence after restart.
+
+Run all relevant checks:
+
+- Backend tests.
+- Frontend tests.
+- TypeScript checks.
+- Production build.
+- Linting.
+- Python static checks.
+- Migration tests.
+- Integration tests.
+- Security checks.
+- Browser tests where available.
+
+Benchmark representative verification workloads.
+
+Report actual measured results, not estimates presented as measurements.
+
+Do not claim support for 1,000 or 5,000 daily active users without representative load testing.
+
+---
+
+16. IMPLEMENTATION PRIORITIES
+
+Use this order to avoid spending time on decorative features while the product is incomplete.
+
+Priority 1 — Protect and verify the existing core.
+
+Priority 2 — Connect the frontend to real CCK backend functionality.
+
+Priority 3 — Deliver the CCK Failure Lab with three reproducible scenarios.
+
+Priority 4 — Deliver Decision Receipts and safe export.
+
+Priority 5 — Make the product responsive and installable as a PWA.
+
+Priority 6 — Complete SDK and integration workflows.
+
+Priority 7 — Implement the product-led sharing loop.
+
+Priority 8 — Complete security, persistence, documentation, and deployment.
+
+Priority 9 — Prepare the public release.
+
+If time or technical constraints prevent everything from being completed, finish the highest-priority working path first.
+
+Do not substitute mockups for working features.
+
+Do not create empty buttons, decorative integrations, fake dashboards, simulated customer activity, or hardcoded success messages.
+
+---
+
+17. GIT AND IMPLEMENTATION RULES
+
+Work directly in the connected repository.
+
+- Preserve existing user code.
+- Preserve existing working functionality.
+- Avoid unnecessary rewrites.
+- Make focused changes.
+- Add tests for new behavior.
+- Keep commits meaningful.
+- Do not overwrite unrelated work.
+- Do not commit secrets.
+- Do not introduce paid dependencies without explicit authorization.
+- Do not force-push.
+- Do not delete existing production data.
+- Do not deploy untested changes.
+
+If you have permission to push to the connected GitHub repository, push the completed changes to the correct branch after tests pass.
+
+If you lack permission, leave the changes in the working repository and report exactly what action is required.
+
+Never claim a commit was pushed unless the push actually succeeded.
+
+---
+
+18. FINAL DELIVERY REPORT
+
+When finished, provide an honest implementation report with these sections:
+
+A. What CCK is now
+
+Describe the actual product and its implemented capabilities.
+
+B. Exact implementation changes
+
+List the files created, modified, and removed.
+
+Explain the purpose of each important change.
+
+C. Core preservation
+
+Confirm which original CCK components were preserved and whether any were changed.
+
+Explain every core change.
+
+D. Release readiness
+
+Report desktop, tablet, Android, iPhone, browser, and PWA testing separately.
+
+Distinguish tested from untested devices and environments.
+
+E. Failure Lab
+
+Report the three scenarios and the actual engine outcomes.
+
+F. Decision Receipts
+
+Report export formats, security controls, redaction, and sharing status.
+
+G. Integrations
+
+For each integration state:
+
+- Implemented or not.
+- Actual tested version.
+- Test results.
+- Remaining limitations.
+
+H. Security and data
+
+Report the persistence system, migrations, tenant isolation, authentication, authorization, backup behavior, and fail-closed testing.
+
+I. Tests and benchmarks
+
+Include exact commands, pass/fail counts, measured latency, throughput, and test environment.
+
+J. Deployment
+
+Provide the exact live URL only if deployment succeeded and was verified.
+
+Otherwise state precisely what is missing.
+
+K. GitHub
+
+Report branch name, commit hash, push status, and release tag status.
+
+L. Remaining blockers
+
+List every important unfinished feature and release risk.
+
+M. Final release recommendation
+
+Choose one:
+
+- READY FOR PUBLIC BETA.
+- READY FOR LIMITED DEVELOPER PREVIEW.
+- NOT READY FOR PUBLIC RELEASE.
+
+Justify the choice with test evidence.
+
+---
+
+FINAL INSTRUCTION
+
+Your objective is to make the existing CCK a product that developers can discover, understand, test, integrate, use, and share.
+
+The core business opportunity is not another AI agent monitoring dashboard.
+
+It is a dependable decision-integrity layer that checks whether the evidence behind consequential agent decisions is still valid before protected actions execute.
+
+Preserve that identity.
+
+Make its value visible in seconds.
+
+Make the first successful experience possible without registration.
+
+Make the result useful enough to share.
+
+Make the integration simple enough to keep.
+
+Make the security and reliability strong enough for real companies.
+
+Most importantly:
+
+Implement and verify the product. Do not merely describe what should be built.
+
+If an item cannot be completed safely, report it honestly and preserve the working architecture rather than faking completion.
