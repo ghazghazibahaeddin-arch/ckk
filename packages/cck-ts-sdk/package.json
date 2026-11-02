@@ -1,0 +1,21 @@
+{
+  "name": "@cck/sdk",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Official TypeScript SDK for the Causal Continuity Kernel (CCK) Agent Reliability & Action Gate Platform",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "keywords": [
+    "ai-agents",
+    "reliability",
+    "guardrails",
+    "action-gate",
+    "causal-continuity",
+    "mcp"
+  ],
+  "author": "Bahaeddin Ghazghazi <bahaghazghazi@gmail.com>",
+  "license": "Apache-2.0"
+}

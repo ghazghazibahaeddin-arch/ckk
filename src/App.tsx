@@ -56,6 +56,7 @@ import {
   Bot,
 } from 'lucide-react';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { signInWithGoogle, signOutUser, subscribeToAuth } from './firebase';
 
 // -------------------------------------------------------------
 // Type Definitions
@@ -73,9 +74,11 @@ export interface AgentItem {
   webhook_url?: string;
   created_at: string;
   last_evaluated_at?: string;
+  last_seen_at?: string;
   total_evaluations: number;
   blocked_evaluations: number;
-  status: 'ACTIVE' | 'PAUSED' | 'DISCONNECTED';
+  status: 'CONNECTED' | 'DISCONNECTED' | 'INVALID_CREDENTIALS' | 'REVOKED' | 'ERROR';
+  key_id?: string;
 }
 interface SystemStatus {
   status: string;
@@ -323,6 +326,22 @@ export default function App() {
   });
   const [testingAgentId, setTestingAgentId] = useState<string | null>(null);
   const [togglingAgentId, setTogglingAgentId] = useState<string | null>(null);
+
+  // 4-Step Connect Agent Onboarding Workflow State
+  const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3 | 4>(1);
+  const [registeredAgent, setRegisteredAgent] = useState<AgentItem | null>(null);
+  const [agentCredentials, setAgentCredentials] = useState<{
+    api_key: string;
+    key_id: string;
+    key_prefix: string;
+    agent_id: string;
+    created_at?: string;
+    note?: string;
+  } | null>(null);
+  const [integrationFramework, setIntegrationFramework] = useState<'langgraph' | 'openai' | 'crewai' | 'mcp' | 'custom_http'>('langgraph');
+  const [verifyingHeartbeat, setVerifyingHeartbeat] = useState(false);
+  const [heartbeatSuccess, setHeartbeatSuccess] = useState<boolean | null>(null);
+  const [heartbeatPayload, setHeartbeatPayload] = useState<any>(null);
 
   // API Keys State
   const [apiKeys, setApiKeys] = useState<ApiKeyItem[]>([]);
@@ -838,25 +857,97 @@ export default function App() {
       });
       if (res.ok) {
         const created = await res.json();
-        setAgents((prev) => [created, ...prev]);
-        setShowConnectAgentModal(false);
-        setNewAgentForm({
-          name: '',
-          framework: 'langgraph',
-          target_capability: 'orders.refund',
-          target_resource: 'order:cust_01',
-          guardrail_mode: 'ENFORCE_AND_BLOCK',
-          freshness_ttl_seconds: 300,
-          webhook_url: '',
-        });
-        showNotification(`Agent '${created.name}' connected successfully!`, 'success');
+        const agentObj: AgentItem = created.agent || created;
+        const creds = created.credentials || null;
+
+        setAgents((prev) => [agentObj, ...prev.filter((a) => a.agent_id !== agentObj.agent_id)]);
+        setRegisteredAgent(agentObj);
+        setAgentCredentials(creds);
+        setIntegrationFramework((newAgentForm.framework as any) || 'langgraph');
+        setOnboardingStep(2); // Step B: Display Generated Credentials
+        setHeartbeatSuccess(null);
+        setHeartbeatPayload(null);
+        showNotification(`Agent registered with status DISCONNECTED. Secret credentials generated.`, 'info');
         fetchStatus();
       } else {
         const err = await res.json();
-        showNotification(err.detail || 'Failed to connect agent', 'error');
+        showNotification(err.detail || 'Failed to register agent', 'error');
       }
     } catch {
-      showNotification('Failed to connect agent', 'error');
+      showNotification('Failed to register agent', 'error');
+    }
+  };
+
+  const handleVerifyAgentHeartbeat = async () => {
+    if (!registeredAgent || !agentCredentials) return;
+    setVerifyingHeartbeat(true);
+    setHeartbeatSuccess(null);
+    try {
+      const res = await fetch(`/api/v1/agents/${registeredAgent.agent_id}/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${agentCredentials.api_key}`,
+        },
+      });
+      const data = await res.json();
+      setHeartbeatPayload(data);
+      if (res.ok && data.status === 'CONNECTED') {
+        setHeartbeatSuccess(true);
+        const updatedAgent: AgentItem = {
+          ...registeredAgent,
+          status: 'CONNECTED',
+          last_seen_at: data.last_seen_at,
+        };
+        setRegisteredAgent(updatedAgent);
+        setAgents((prev) => prev.map((a) => (a.agent_id === updatedAgent.agent_id ? updatedAgent : a)));
+        showNotification(`Agent connection verified! Status is now CONNECTED.`, 'success');
+        fetchStatus();
+      } else {
+        setHeartbeatSuccess(false);
+        showNotification(data.detail || 'Heartbeat verification failed', 'error');
+      }
+    } catch {
+      setHeartbeatSuccess(false);
+      showNotification('Network error during heartbeat verification', 'error');
+    } finally {
+      setVerifyingHeartbeat(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    try {
+      const user = await signInWithGoogle();
+      if (user) {
+        setCurrentUser({
+          userId: user.uid,
+          username: user.email?.split('@')[0] || 'developer',
+          displayName: user.displayName || user.email || 'CCK Engineer',
+          role: 'admin',
+          tenantId: `tenant-${user.uid.slice(0, 8)}`,
+        });
+        setShowAuthModal(false);
+        showNotification(`Signed in with Google as ${user.displayName || user.email}`, 'success');
+      }
+    } catch {
+      showNotification('Google Sign-In was cancelled or encountered an error', 'error');
+    }
+  };
+
+  const handleSignOutUser = async () => {
+    try {
+      await signOutUser();
+      setCurrentUser({
+        userId: 'anonymous',
+        username: 'Guest',
+        displayName: 'Guest User',
+        role: 'viewer',
+        tenantId: 'tenant-guest',
+      });
+      setShowAuthModal(false);
+      showNotification('Signed out successfully', 'info');
+    } catch {
+      showNotification('Error signing out', 'error');
     }
   };
 
@@ -1746,7 +1837,15 @@ export default function App() {
                             ID: {agent.agent_id}
                           </div>
                         </div>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                            agent.status === 'CONNECTED'
+                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                              : agent.status === 'DISCONNECTED'
+                              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                              : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                          }`}
+                        >
                           {agent.status}
                         </span>
                       </div>
@@ -3886,194 +3985,559 @@ if (verdict.decision === 'ALLOW') {
       {/* ------------------------------------------------------- */}
       {/* Connect New Agent Modal                                 */}
       {/* ------------------------------------------------------- */}
+      {/* ------------------------------------------------------- */}
+      {/* 4-Step Connect Your AI Agent Onboarding Wizard           */}
+      {/* ------------------------------------------------------- */}
       {showConnectAgentModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className={`w-full max-w-lg rounded-2xl border p-6 space-y-4 ${bgCard}`}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
+          <div className={`w-full max-w-2xl rounded-2xl border p-6 space-y-5 shadow-2xl ${bgCard}`}>
+            {/* Header */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-700">
               <div className="flex items-center space-x-2">
                 <Bot className="w-5 h-5 text-cyan-400" />
-                <h3 className="font-bold text-base">Connect Your AI Agent</h3>
+                <h3 className="font-bold text-base text-slate-100">Connect Your AI Agent</h3>
               </div>
-              <button onClick={() => setShowConnectAgentModal(false)} className="text-slate-400 hover:text-white">
+              <button
+                onClick={() => {
+                  setShowConnectAgentModal(false);
+                  setOnboardingStep(1);
+                }}
+                className="text-slate-400 hover:text-white"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleConnectAgent} className="space-y-4 text-xs">
-              <div>
-                <label className="block font-medium mb-1">Agent Name</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. RefundProcessorBot or DevOpsDeployer"
-                  value={newAgentForm.name}
-                  onChange={(e) => setNewAgentForm({ ...newAgentForm, name: e.target.value })}
-                  className={`w-full px-3 py-2 rounded-xl border ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
-                />
+            {/* Stepper Progress Bar */}
+            <div className="grid grid-cols-4 gap-2 text-[11px] font-mono">
+              <div className={`p-2 rounded-lg border text-center transition-colors ${onboardingStep >= 1 ? 'border-cyan-500/50 bg-cyan-950/30 text-cyan-300' : 'border-slate-800 bg-slate-900/50 text-slate-500'}`}>
+                1. Register
               </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-medium mb-1">Agent Framework</label>
-                  <select
-                    value={newAgentForm.framework}
-                    onChange={(e) => setNewAgentForm({ ...newAgentForm, framework: e.target.value })}
-                    className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
-                  >
-                    <option value="langgraph">LangGraph (Python)</option>
-                    <option value="openai">OpenAI Agents SDK</option>
-                    <option value="crewai">CrewAI</option>
-                    <option value="mcp">MCP (Model Context Protocol)</option>
-                    <option value="custom_http">Custom REST API</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-medium mb-1">Guardrail Enforcement</label>
-                  <select
-                    value={newAgentForm.guardrail_mode}
-                    onChange={(e) => setNewAgentForm({ ...newAgentForm, guardrail_mode: e.target.value as 'ENFORCE_AND_BLOCK' | 'REQUIRE_APPROVAL' | 'OBSERVE_ONLY' })}
-                    className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
-                  >
-                    <option value="ENFORCE_AND_BLOCK">ENFORCE &amp; BLOCK</option>
-                    <option value="REQUIRE_APPROVAL">REQUIRE APPROVAL</option>
-                    <option value="OBSERVE_ONLY">OBSERVE ONLY (Shadow)</option>
-                  </select>
-                </div>
+              <div className={`p-2 rounded-lg border text-center transition-colors ${onboardingStep >= 2 ? 'border-cyan-500/50 bg-cyan-950/30 text-cyan-300' : 'border-slate-800 bg-slate-900/50 text-slate-500'}`}>
+                2. Credentials
               </div>
+              <div className={`p-2 rounded-lg border text-center transition-colors ${onboardingStep >= 3 ? 'border-cyan-500/50 bg-cyan-950/30 text-cyan-300' : 'border-slate-800 bg-slate-900/50 text-slate-500'}`}>
+                3. Integrate
+              </div>
+              <div className={`p-2 rounded-lg border text-center transition-colors ${onboardingStep >= 4 ? 'border-cyan-500/50 bg-cyan-950/30 text-cyan-300' : 'border-slate-800 bg-slate-900/50 text-slate-500'}`}>
+                4. Verify Live
+              </div>
+            </div>
 
-              <div className="grid grid-cols-2 gap-3">
+            {/* Step 1: Agent Registration Form */}
+            {onboardingStep === 1 && (
+              <form onSubmit={handleConnectAgent} className="space-y-4 text-xs">
                 <div>
-                  <label className="block font-medium mb-1">Target Capability</label>
+                  <label className="block font-medium mb-1">Agent Name</label>
                   <input
                     type="text"
                     required
-                    placeholder="e.g. billing.refund or orders.dispatch"
-                    value={newAgentForm.target_capability}
-                    onChange={(e) => setNewAgentForm({ ...newAgentForm, target_capability: e.target.value })}
-                    className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                    placeholder="e.g. OrderFulfillmentBot or RefundSupervisor"
+                    value={newAgentForm.name}
+                    onChange={(e) => setNewAgentForm({ ...newAgentForm, name: e.target.value })}
+                    className={`w-full px-3 py-2 rounded-xl border ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
                   />
                 </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-medium mb-1">Agent Framework</label>
+                    <select
+                      value={newAgentForm.framework}
+                      onChange={(e) => setNewAgentForm({ ...newAgentForm, framework: e.target.value })}
+                      className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                    >
+                      <option value="langgraph">LangGraph (Python)</option>
+                      <option value="openai">OpenAI Agents SDK</option>
+                      <option value="crewai">CrewAI (Python)</option>
+                      <option value="mcp">MCP (Model Context Protocol)</option>
+                      <option value="custom_http">TypeScript SDK / REST API</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-medium mb-1">Guardrail Enforcement</label>
+                    <select
+                      value={newAgentForm.guardrail_mode}
+                      onChange={(e) => setNewAgentForm({ ...newAgentForm, guardrail_mode: e.target.value as 'ENFORCE_AND_BLOCK' | 'REQUIRE_APPROVAL' | 'OBSERVE_ONLY' })}
+                      className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                    >
+                      <option value="ENFORCE_AND_BLOCK">ENFORCE &amp; BLOCK (Strict Fail-Closed)</option>
+                      <option value="REQUIRE_APPROVAL">REQUIRE APPROVAL (Human-in-the-Loop)</option>
+                      <option value="OBSERVE_ONLY">OBSERVE ONLY (Shadow Mode)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-medium mb-1">Target Capability</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. logistics.ship or orders.refund"
+                      value={newAgentForm.target_capability}
+                      onChange={(e) => setNewAgentForm({ ...newAgentForm, target_capability: e.target.value })}
+                      className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-medium mb-1">Target Resource</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. order:cust_01 or courier.fedex"
+                      value={newAgentForm.target_resource}
+                      onChange={(e) => setNewAgentForm({ ...newAgentForm, target_resource: e.target.value })}
+                      className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
+                    />
+                  </div>
+                </div>
+
                 <div>
-                  <label className="block font-medium mb-1">Target Resource</label>
+                  <label className="block font-medium mb-1">Freshness TTL Tolerance (seconds)</label>
                   <input
-                    type="text"
-                    required
-                    placeholder="e.g. order:cust_01 or db:prod"
-                    value={newAgentForm.target_resource}
-                    onChange={(e) => setNewAgentForm({ ...newAgentForm, target_resource: e.target.value })}
+                    type="number"
+                    min="5"
+                    max="86400"
+                    value={newAgentForm.freshness_ttl_seconds}
+                    onChange={(e) => setNewAgentForm({ ...newAgentForm, freshness_ttl_seconds: Number(e.target.value) })}
                     className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
                   />
+                  <p className="text-[10px] text-slate-400 mt-1">Actions relying on evidence older than this TTL will be rejected with a REVALIDATE verdict.</p>
+                </div>
+
+                <div className="pt-2 flex justify-end space-x-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowConnectAgentModal(false)}
+                    className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-medium"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs shadow-md shadow-cyan-500/20"
+                  >
+                    Generate Agent &amp; Credentials &rarr;
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Step 2: Secret API Key Generation Display */}
+            {onboardingStep === 2 && agentCredentials && registeredAgent && (
+              <div className="space-y-4 text-xs">
+                <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 space-y-1">
+                  <div className="flex items-center space-x-2 font-bold">
+                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    <span>Save Your Secret API Key Now</span>
+                  </div>
+                  <p className="text-[11px] leading-relaxed">
+                    This raw project-scoped API key will <strong>never be shown again</strong>. Store it in your agent’s secure environment secrets.
+                  </p>
+                </div>
+
+                <div className="p-4 rounded-xl border border-slate-700 bg-slate-900/80 space-y-3 font-mono">
+                  <div className="flex items-center justify-between text-slate-400 text-[11px]">
+                    <span>Agent ID: <strong className="text-slate-200">{registeredAgent.agent_id}</strong></span>
+                    <span className="px-2 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                      STATUS: {registeredAgent.status}
+                    </span>
+                  </div>
+
+                  <div>
+                    <div className="text-slate-400 text-[10px] mb-1">AGENT API SECRET KEY</div>
+                    <div className="flex items-center justify-between bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                      <span className="text-emerald-400 break-all text-xs font-semibold select-all">
+                        {agentCredentials.api_key}
+                      </span>
+                      <button
+                        onClick={() => copyText(agentCredentials.api_key, 'api-key-copy')}
+                        className="ml-3 shrink-0 px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs flex items-center space-x-1"
+                      >
+                        {copiedId === 'api-key-copy' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedId === 'api-key-copy' ? 'Copied' : 'Copy'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 text-[11px] text-slate-300">
+                    <span className="text-cyan-400"># Set environment variable</span>
+                    <br />
+                    export CCK_API_KEY="{agentCredentials.api_key}"
+                    <br />
+                    export CCK_BASE_URL="http://localhost:3000"
+                  </div>
+                </div>
+
+                <div className="flex justify-between items-center pt-2">
+                  <button
+                    onClick={() => setOnboardingStep(1)}
+                    className="px-3 py-2 rounded-xl text-slate-400 hover:text-slate-200 text-xs"
+                  >
+                    &larr; Back
+                  </button>
+                  <button
+                    onClick={() => setOnboardingStep(3)}
+                    className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs shadow-md shadow-cyan-500/20"
+                  >
+                    Next: Integration Code &rarr;
+                  </button>
                 </div>
               </div>
+            )}
 
-              <div>
-                <label className="block font-medium mb-1">Freshness TTL Tolerance (seconds)</label>
-                <input
-                  type="number"
-                  min="5"
-                  max="86400"
-                  value={newAgentForm.freshness_ttl_seconds}
-                  onChange={(e) => setNewAgentForm({ ...newAgentForm, freshness_ttl_seconds: Number(e.target.value) })}
-                  className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'}`}
-                />
-              </div>
+            {/* Step 3: Framework Integration Code */}
+            {onboardingStep === 3 && registeredAgent && agentCredentials && (
+              <div className="space-y-4 text-xs">
+                {/* Framework Selector Tabs */}
+                <div className="flex flex-wrap gap-1 border-b border-slate-800 pb-2">
+                  {(['langgraph', 'openai', 'crewai', 'mcp', 'custom_http'] as const).map((fw) => (
+                    <button
+                      key={fw}
+                      onClick={() => setIntegrationFramework(fw)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-mono transition-colors ${integrationFramework === fw ? 'bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 font-bold' : 'text-slate-400 hover:text-slate-200'}`}
+                    >
+                      {fw === 'langgraph' ? 'LangGraph' : fw === 'openai' ? 'OpenAI SDK' : fw === 'crewai' ? 'CrewAI' : fw === 'mcp' ? 'MCP Protocol' : 'TypeScript SDK'}
+                    </button>
+                  ))}
+                </div>
 
-              <div className="pt-2 flex justify-end space-x-2">
-                <button
-                  type="button"
-                  onClick={() => setShowConnectAgentModal(false)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-medium"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs shadow-md shadow-cyan-500/20"
-                >
-                  Connect Agent
-                </button>
+                <div className="relative rounded-xl border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] text-slate-300 space-y-2 overflow-x-auto">
+                  <button
+                    onClick={() => {
+                      const codeEl = document.getElementById('framework-code-block');
+                      if (codeEl) copyText(codeEl.innerText, 'code-block-copy');
+                    }}
+                    className="absolute top-2 right-2 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] flex items-center space-x-1"
+                  >
+                    {copiedId === 'code-block-copy' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedId === 'code-block-copy' ? 'Copied' : 'Copy Code'}</span>
+                  </button>
+
+                  <pre id="framework-code-block" className="whitespace-pre-wrap leading-relaxed">
+{integrationFramework === 'langgraph' && `# 1. Install official SDK
+pip install cck-python-sdk
+
+import os
+from cck_sdk import CCKClient, AgentAction, AgentIdentity, with_cck_guard
+
+# 2. Connect client with your minted secret key
+cck = CCKClient(
+    base_url=os.getenv("CCK_BASE_URL", "http://localhost:3000"),
+    api_key="${agentCredentials.api_key}",
+)
+
+# 3. Guard tool execution before mutating real world resources
+def protected_shipping_tool(order_id: str):
+    action = AgentAction(
+        agent=AgentIdentity(agent_id="${registeredAgent.agent_id}", name="${registeredAgent.name}"),
+        session_id="session-langgraph-001",
+        capability="${registeredAgent.target_capability}",
+        target="${registeredAgent.target_resource}",
+        parameters={"order_id": order_id},
+    )
+    # Fail-closed wrapper: throws CCKActionBlockedError if fact is stale or invalid!
+    return with_cck_guard(cck, action, lambda: print(f"Dispatched order {order_id}"))`}
+
+{integrationFramework === 'openai' && `# 1. Install official SDK
+pip install cck-python-sdk openai
+
+from cck_sdk import CCKClient
+from cck_sdk.openai import CCKOpenAIGuard
+
+cck = CCKClient(api_key="${agentCredentials.api_key}")
+guard = CCKOpenAIGuard(cck, agent_id="${registeredAgent.agent_id}")
+
+# 2. Wrap tool handler call
+result = guard.execute_tool_call(
+    tool_call_id="call_99",
+    function_name="${registeredAgent.target_capability}",
+    arguments={"target": "${registeredAgent.target_resource}"},
+    handler=lambda args: print("Action executed safely!")
+)`}
+
+{integrationFramework === 'crewai' && `# 1. Install official SDK
+pip install cck-python-sdk
+
+from cck_sdk import CCKClient, cck_protect
+
+cck = CCKClient(api_key="${agentCredentials.api_key}")
+
+@cck_protect(cck, lambda order_id: AgentAction(
+    agent=AgentIdentity(agent_id="${registeredAgent.agent_id}", name="${registeredAgent.name}"),
+    session_id="crewai-job",
+    capability="${registeredAgent.target_capability}",
+    target="${registeredAgent.target_resource}",
+))
+def run_crew_tool(order_id: str):
+    return f"Shipped order {order_id}"`}
+
+{integrationFramework === 'mcp' && `// Connect via JSON-RPC MCP Server endpoint:
+POST /api/v1/mcp
+Headers: { "Authorization": "Bearer ${agentCredentials.api_key}" }
+
+Payload:
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "cck_evaluate_action",
+    "arguments": {
+      "capability": "${registeredAgent.target_capability}",
+      "target": "${registeredAgent.target_resource}"
+    }
+  }
+}`}
+
+{integrationFramework === 'custom_http' && `// 1. Install TypeScript SDK
+npm install @cck/sdk
+
+import { CCKClient, withCCKGuard } from '@cck/sdk';
+
+const cck = new CCKClient({
+  baseUrl: 'http://localhost:3000',
+  apiKey: '${agentCredentials.api_key}',
+});
+
+// Guard tool execution
+await withCCKGuard(
+  {
+    client: cck,
+    action: {
+      session_id: 'session-ts-01',
+      agent: { agent_id: '${registeredAgent.agent_id}', name: '${registeredAgent.name}' },
+      capability: '${registeredAgent.target_capability}',
+      target: '${registeredAgent.target_resource}',
+    },
+  },
+  async () => {
+    // Protected tool logic
+    return await mutateExternalSystem();
+  }
+);`}
+                  </pre>
+                </div>
+
+                <div className="flex justify-between items-center pt-2">
+                  <button
+                    onClick={() => setOnboardingStep(2)}
+                    className="px-3 py-2 rounded-xl text-slate-400 hover:text-slate-200 text-xs"
+                  >
+                    &larr; Back
+                  </button>
+                  <button
+                    onClick={() => setOnboardingStep(4)}
+                    className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs shadow-md shadow-cyan-500/20"
+                  >
+                    Next: Verify Live Connection &rarr;
+                  </button>
+                </div>
               </div>
-            </form>
+            )}
+
+            {/* Step 4: Live Authenticated Verification */}
+            {onboardingStep === 4 && registeredAgent && agentCredentials && (
+              <div className="space-y-4 text-xs">
+                <div className="p-4 rounded-xl border border-slate-700 bg-slate-900/60 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="font-bold text-sm text-slate-200">{registeredAgent.name}</h4>
+                      <p className="font-mono text-[11px] text-slate-400">Agent ID: {registeredAgent.agent_id}</p>
+                    </div>
+                    <span className={`px-2.5 py-1 rounded text-xs font-mono font-bold ${registeredAgent.status === 'CONNECTED' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' : 'bg-amber-500/20 text-amber-400 border border-amber-500/40'}`}>
+                      {registeredAgent.status}
+                    </span>
+                  </div>
+
+                  <div className="text-slate-300 text-[11px] leading-relaxed">
+                    {registeredAgent.status === 'CONNECTED' ? (
+                      <div className="flex items-center space-x-2 text-emerald-400 font-semibold">
+                        <CheckCircle2 className="w-5 h-5 shrink-0" />
+                        <span>Authenticated connection verified! Real-time heartbeat active.</span>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <p>To ensure zero fake connections, CCK marks newly registered agents as <strong>DISCONNECTED</strong> until an authenticated heartbeat request is verified with the secret bearer token.</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {heartbeatPayload && (
+                    <div className="p-2.5 rounded-lg bg-slate-950 font-mono text-[10px] text-slate-300 border border-slate-800">
+                      <div className="text-slate-400 mb-0.5">HEARTBEAT RESPONSE:</div>
+                      <pre className="whitespace-pre-wrap">{JSON.stringify(heartbeatPayload, null, 2)}</pre>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex justify-between items-center pt-2">
+                  <button
+                    onClick={() => setOnboardingStep(3)}
+                    className="px-3 py-2 rounded-xl text-slate-400 hover:text-slate-200 text-xs"
+                  >
+                    &larr; Back
+                  </button>
+
+                  <div className="flex items-center space-x-2">
+                    {registeredAgent.status !== 'CONNECTED' ? (
+                      <button
+                        onClick={handleVerifyAgentHeartbeat}
+                        disabled={verifyingHeartbeat}
+                        className="px-5 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs shadow-md shadow-cyan-500/20 flex items-center space-x-1.5 disabled:opacity-50"
+                      >
+                        {verifyingHeartbeat ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+                        <span>{verifyingHeartbeat ? 'Verifying Key...' : 'Test Live Heartbeat'}</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          setShowConnectAgentModal(false);
+                          setOnboardingStep(1);
+                        }}
+                        className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-md shadow-emerald-500/20"
+                      >
+                        Done &mdash; View in Agent Fleet
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* ------------------------------------------------------- */}
-      {/* Auth Modal (Login / Register) */}
+      {/* Firebase Customer Authentication & Profile Modal        */}
       {/* ------------------------------------------------------- */}
       {showAuthModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-          <div className={`w-full max-w-sm rounded-2xl border p-6 ${bgCard}`}>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-bold text-base">
-                {authMode === 'login' ? 'Sign in to CCK' : 'Create CCK Account'}
-              </h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className={`w-full max-w-sm rounded-2xl border p-6 space-y-4 ${bgCard}`}>
+            <div className="flex items-center justify-between pb-2 border-b border-slate-700">
+              <div className="flex items-center space-x-2">
+                <Users className="w-5 h-5 text-cyan-400" />
+                <h3 className="font-bold text-base text-slate-100">
+                  {currentUser.userId !== 'anonymous' && currentUser.userId !== 'usr-admin-01'
+                    ? 'Customer Account Profile'
+                    : 'Developer Sign-In'}
+                </h3>
+              </div>
               <button onClick={() => setShowAuthModal(false)} className="text-slate-400 hover:text-white">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleAuthSubmit} className="space-y-3 text-xs">
-              <div>
-                <label className="block font-medium mb-1 font-sans">Username</label>
-                <input
-                  type="text"
-                  required
-                  value={authForm.username}
-                  onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
-                  className={`w-full px-3 py-2 rounded-xl border font-mono ${
-                    isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'
-                  }`}
-                />
-              </div>
+            {/* Profile View if signed in */}
+            {currentUser.userId && currentUser.userId !== 'anonymous' ? (
+              <div className="space-y-4 text-xs">
+                <div className="p-4 rounded-xl border border-slate-700 bg-slate-900/60 space-y-2">
+                  <div className="flex items-center space-x-3">
+                    <div className="w-10 h-10 rounded-full bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center font-bold text-cyan-300 text-sm">
+                      {currentUser.displayName.charAt(0).toUpperCase()}
+                    </div>
+                    <div>
+                      <div className="font-bold text-slate-200 text-sm">{currentUser.displayName}</div>
+                      <div className="font-mono text-[11px] text-slate-400">{currentUser.username}</div>
+                    </div>
+                  </div>
 
-              {authMode === 'register' && (
-                <div>
-                  <label className="block font-medium mb-1 font-sans">Display Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={authForm.displayName}
-                    onChange={(e) => setAuthForm({ ...authForm, displayName: e.target.value })}
-                    className={`w-full px-3 py-2 rounded-xl border font-sans ${
-                      isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'
-                    }`}
-                  />
+                  <div className="pt-2 border-t border-slate-800 space-y-1 font-mono text-[11px]">
+                    <div className="flex justify-between text-slate-400">
+                      <span>Tenant ID:</span>
+                      <span className="text-slate-200 font-semibold">{currentUser.tenantId}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-400">
+                      <span>Role:</span>
+                      <span className="text-cyan-400 font-semibold">{currentUser.role.toUpperCase()}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-400">
+                      <span>Persistence:</span>
+                      <span className="text-emerald-400 font-semibold">Firebase Firestore</span>
+                    </div>
+                  </div>
                 </div>
-              )}
 
-              <div>
-                <label className="block font-medium mb-1 font-sans">Password</label>
-                <input
-                  type="password"
-                  required
-                  value={authForm.password}
-                  onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
-                  className={`w-full px-3 py-2 rounded-xl border font-mono ${
-                    isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-100 border-slate-300'
-                  }`}
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="w-full mt-2 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold font-sans text-xs transition-colors shadow-sm"
-              >
-                {authMode === 'login' ? 'Sign In' : 'Register Account'}
-              </button>
-
-              <div className="text-center pt-2">
                 <button
                   type="button"
-                  onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}
-                  className="text-cyan-400 hover:underline text-[11px]"
+                  onClick={handleSignOutUser}
+                  className="w-full py-2.5 rounded-xl border border-rose-500/40 bg-rose-950/30 hover:bg-rose-950/50 text-rose-300 font-semibold text-xs flex items-center justify-center space-x-2 transition-colors"
                 >
-                  {authMode === 'login'
-                    ? "Don't have an account? Register"
-                    : 'Already have an account? Sign in'}
+                  <LogOut className="w-4 h-4" />
+                  <span>Sign Out</span>
                 </button>
               </div>
-            </form>
+            ) : (
+              <div className="space-y-4 text-xs">
+                <p className="text-slate-400 text-[11px] leading-relaxed">
+                  Sign in with your Google account via Firebase Authentication to manage workspaces, projects, and connect agents with persistent data.
+                </p>
+
+                {/* Google Sign In Button */}
+                <button
+                  type="button"
+                  onClick={handleGoogleSignIn}
+                  className="w-full py-2.5 px-4 rounded-xl border border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-100 font-semibold text-xs flex items-center justify-center space-x-2.5 shadow-md transition-colors"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path
+                      fill="#4285F4"
+                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                    />
+                    <path
+                      fill="#EA4335"
+                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                    />
+                  </svg>
+                  <span>Sign in with Google</span>
+                </button>
+
+                <div className="relative my-3">
+                  <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-800" /></div>
+                  <div className="relative flex justify-center text-[10px] uppercase font-mono"><span className="bg-slate-900 px-2 text-slate-500">Or use developer credentials</span></div>
+                </div>
+
+                <form onSubmit={handleAuthSubmit} className="space-y-3 text-xs">
+                  <div>
+                    <label className="block font-medium mb-1 font-sans text-slate-300">Username</label>
+                    <input
+                      type="text"
+                      required
+                      value={authForm.username}
+                      onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
+                      className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-slate-100 border-slate-300'}`}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block font-medium mb-1 font-sans text-slate-300">Password</label>
+                    <input
+                      type="password"
+                      required
+                      value={authForm.password}
+                      onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+                      className={`w-full px-3 py-2 rounded-xl border font-mono ${isDark ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-slate-100 border-slate-300'}`}
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full mt-2 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold font-sans text-xs transition-colors shadow-sm"
+                  >
+                    Sign In to Console
+                  </button>
+                </form>
+              </div>
+            )}
           </div>
         </div>
       )}

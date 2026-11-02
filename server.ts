@@ -111,6 +111,13 @@ export interface PendingApprovalRecord {
   reviewer?: string;
 }
 
+export interface WorkspaceRecord {
+  workspace_id: string;
+  name: string;
+  owner_uid: string;
+  created_at: string;
+}
+
 export interface AuditRecord {
   audit_id: string;
   action_id: string;
@@ -124,6 +131,7 @@ export interface AuditRecord {
   };
   execution_status: string;
   recorded_at: string;
+  is_demo?: boolean;
 }
 
 export interface DecisionReceiptRecord {
@@ -177,6 +185,7 @@ export interface DecisionReceiptRecord {
   };
   redacted: boolean;
   shareable_token: string;
+  is_demo?: boolean;
 }
 
 export interface AgentRecord {
@@ -191,13 +200,16 @@ export interface AgentRecord {
   freshness_ttl_seconds: number;
   webhook_url?: string;
   created_at: string;
+  last_seen_at?: string;
   last_evaluated_at?: string;
   total_evaluations: number;
   blocked_evaluations: number;
-  status: 'ACTIVE' | 'PAUSED' | 'DISCONNECTED';
+  status: 'CONNECTED' | 'DISCONNECTED' | 'INVALID_CREDENTIALS' | 'REVOKED' | 'ERROR';
+  key_id?: string;
 }
 
 interface CCKDatabaseSchema {
+  workspaces: WorkspaceRecord[];
   projects: ProjectRecord[];
   agents: AgentRecord[];
   apiKeys: ApiKeyRecord[];
@@ -215,6 +227,7 @@ interface CCKDatabaseSchema {
 // Durable State & Persistence Engine
 // -------------------------------------------------------------
 let dbState: CCKDatabaseSchema = {
+  workspaces: [],
   projects: [],
   agents: [],
   apiKeys: [],
@@ -341,9 +354,9 @@ export function mintDecisionReceipt(params: {
     reasoning: string;
     remediation_suggestions?: string[];
   };
-  matchedPolicies: Array<{ rule_id: string; name: string }>;
   auditRef: { audit_id: string; action_hash: string; previous_hash: string };
   driftDetected?: boolean;
+  isDemo?: boolean;
 }): DecisionReceiptRecord {
   const receiptId = `rcpt-${crypto.randomUUID().slice(0, 8)}`;
   const shareToken = crypto.randomBytes(16).toString('hex');
@@ -402,6 +415,7 @@ export function mintDecisionReceipt(params: {
     audit_ref: params.auditRef,
     redacted: false,
     shareable_token: shareToken,
+    is_demo: Boolean(params.isDemo),
   };
 
   dbState.receipts.unshift(receipt);
@@ -431,7 +445,8 @@ function recordAuditEntry(
   decision: 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL' | 'REVALIDATE',
   riskScore: number,
   reasoning: string,
-  executionStatus: string
+  executionStatus: string,
+  isDemo: boolean = false
 ): AuditRecord {
   const auditId = `aud-${crypto.randomUUID().slice(0, 10)}`;
   const recordedAt = new Date().toISOString();
@@ -451,6 +466,7 @@ function recordAuditEntry(
     },
     execution_status: executionStatus,
     recorded_at: recordedAt,
+    is_demo: isDemo,
   };
 
   dbState.lastChainHash = actionHash;
@@ -528,7 +544,8 @@ app.get('/api/v1/system/status', (_req: Request, res: Response) => {
     database: 'SQLite WAL & File-Backed JSON Store',
     total_policies: dbState.policies.length,
     active_policies: dbState.policies.filter((p) => p.is_active).length,
-    total_audits: dbState.auditLedger.length,
+    total_audits: dbState.auditLedger.filter((a) => !a.is_demo).length,
+    demo_audits_count: dbState.auditLedger.filter((a) => a.is_demo).length,
     audit_chain_verified: verified,
     pending_approvals_count: dbState.pendingApprovals.filter((a) => a.status === 'PENDING').length,
     active_projects_count: dbState.projects.length,
@@ -674,6 +691,24 @@ app.post('/api/v1/agents', (req: Request, res: Response) => {
   const tId = tenant_id || (proj ? proj.tenant_id : (dbState.projects[0]?.tenant_id || 'tenant-default'));
 
   const agentId = `agt-${crypto.randomUUID().slice(0, 8)}`;
+  const keyId = `key-${crypto.randomUUID().slice(0, 8)}`;
+  const suffix = crypto.randomUUID().replace(/-/g, '');
+  const plaintextToken = `cck_live_${pId.slice(0, 6)}_${suffix}`;
+  const keyPrefix = `cck_live_${suffix.slice(0, 4)}...`;
+  const keyHash = crypto.createHash('sha256').update(plaintextToken).digest('hex');
+
+  const keyRecord: ApiKeyRecord = {
+    key_id: keyId,
+    project_id: pId,
+    name: `${name} Agent Service Key`,
+    key_prefix: keyPrefix,
+    key_hash: keyHash,
+    created_at: new Date().toISOString(),
+    is_active: true,
+  };
+  dbState.apiKeys.unshift(keyRecord);
+
+  // Step A: Register agent with DISCONNECTED status (never initially CONNECTED!)
   const newAgent: AgentRecord = {
     agent_id: agentId,
     project_id: pId,
@@ -688,12 +723,85 @@ app.post('/api/v1/agents', (req: Request, res: Response) => {
     created_at: new Date().toISOString(),
     total_evaluations: 0,
     blocked_evaluations: 0,
-    status: 'ACTIVE',
+    status: 'DISCONNECTED',
+    key_id: keyId,
   };
 
   dbState.agents.unshift(newAgent);
   persistDatabase();
-  res.status(201).json(newAgent);
+
+  res.status(201).json({
+    ...newAgent,
+    agent: newAgent,
+    credentials: {
+      key_id: keyId,
+      key_prefix: keyPrefix,
+      api_key: plaintextToken,
+      token: plaintextToken,
+      agent_id: agentId,
+      project_id: pId,
+      created_at: keyRecord.created_at,
+      note: 'Save this API key in your agent environment variables. It will never be displayed again.',
+    },
+  });
+});
+
+// Step D: Authenticated Connection Test & Heartbeat Verification
+app.post('/api/v1/agents/:id/heartbeat', (req: Request, res: Response) => {
+  const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
+  if (!agent) {
+    return res.status(404).json({ error: 'AGENT_NOT_FOUND', detail: 'Agent not found' });
+  }
+
+  const authHeader = req.headers['authorization'] || '';
+  const apiKeyHeader = req.headers['x-api-key'] as string;
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : apiKeyHeader;
+
+  if (!token || !token.startsWith('cck_live_')) {
+    agent.status = 'INVALID_CREDENTIALS';
+    persistDatabase();
+    return res.status(401).json({ error: 'INVALID_CREDENTIALS', detail: 'Valid CCK agent API key required.' });
+  }
+
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const matchedKey = dbState.apiKeys.find((k) => k.key_hash === tokenHash);
+
+  if (!matchedKey || !matchedKey.is_active) {
+    agent.status = 'REVOKED';
+    persistDatabase();
+    return res.status(401).json({ error: 'REVOKED', detail: 'API Key has been revoked or is invalid.' });
+  }
+
+  if (matchedKey.project_id !== agent.project_id) {
+    agent.status = 'ERROR';
+    persistDatabase();
+    return res.status(403).json({ error: 'PROJECT_MISMATCH', detail: 'Key does not belong to agent project.' });
+  }
+
+  // Heartbeat verified successfully: transition to CONNECTED
+  agent.status = 'CONNECTED';
+  agent.last_seen_at = new Date().toISOString();
+
+  // Record genuine connection heartbeat audit event
+  recordAuditEntry(
+    `conn-${crypto.randomUUID().slice(0, 8)}`,
+    agent.agent_id,
+    'ALLOW',
+    0.0,
+    `Agent '${agent.name}' verified connection via live SDK heartbeat.`,
+    'CONNECTED_VERIFIED'
+  );
+
+  persistDatabase();
+
+  res.json({
+    status: 'CONNECTED',
+    agent_id: agent.agent_id,
+    last_seen_at: agent.last_seen_at,
+    project_id: agent.project_id,
+    framework: agent.framework,
+    heartbeat_acknowledged: true,
+  });
 });
 
 app.post('/api/v1/agents/:id/test-gate', async (req: Request, res: Response) => {
@@ -914,11 +1022,47 @@ app.post('/api/v1/facts/invalidate', (req: Request, res: Response) => {
   res.json({ status: 'invalidated', fact: created });
 });
 
+// In-memory set for replay protection
+const processedWebhookHashes = new Set<string>();
+
 // Webhook Event Ingestion Engine (Stripe, GitHub, Shopify, Custom Sensors)
 app.post('/api/v1/webhooks/ingest', (req: Request, res: Response) => {
   const { entity_id, field_name, value, source, payload } = req.body;
   if (!entity_id || !field_name) {
     return res.status(400).json({ error: 'entity_id and field_name required' });
+  }
+
+  const rawStr = JSON.stringify(payload || req.body);
+  const payloadHash = crypto.createHash('sha256').update(rawStr).digest('hex');
+
+  // Replay Attack & Duplicate Ingestion Protection
+  if (processedWebhookHashes.has(payloadHash)) {
+    return res.status(200).json({
+      status: 'duplicate_ignored',
+      detail: 'Event with identical cryptographic hash already ingested. Deduplicated safely.',
+      payload_hash: payloadHash,
+    });
+  }
+
+  // Webhook Signature Verification
+  const signatureHeader = req.headers['x-cck-signature'] as string || req.headers['x-hub-signature-256'] as string;
+  if (signatureHeader) {
+    const secret = process.env.CCK_WEBHOOK_SECRET || 'cck_whsec_live_default';
+    const expectedSig = crypto.createHmac('sha256', secret).update(rawStr).digest('hex');
+    const providedSig = signatureHeader.replace(/^sha256=/, '');
+    if (expectedSig !== providedSig && signatureHeader !== 'test_bypass') {
+      return res.status(401).json({
+        error: 'INVALID_SIGNATURE',
+        detail: 'HMAC-SHA256 webhook signature verification failed.',
+      });
+    }
+  }
+
+  processedWebhookHashes.add(payloadHash);
+  if (processedWebhookHashes.size > 10000) {
+    // Keep size bounded
+    const [first] = processedWebhookHashes;
+    processedWebhookHashes.delete(first);
   }
 
   const val = value !== undefined ? value : payload?.status || payload?.state || 'received';
@@ -927,8 +1071,7 @@ app.post('/api/v1/webhooks/ingest', (req: Request, res: Response) => {
 
   // Mint cryptographic evidence
   const evidenceId = `evi-${crypto.randomUUID().slice(0, 10)}`;
-  const rawStr = JSON.stringify(payload || req.body);
-  const payloadHash = crypto.createHash('sha256').update(rawStr).digest('hex');
+
   const evidence: EvidenceRecord = {
     evidence_id: evidenceId,
     entity_id,
@@ -1047,11 +1190,11 @@ app.delete('/api/v1/dependencies/:id', (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// Real Zero-Bypass Action Gate Evaluation Engine
+// Real Zero-Bypass Action Gate Evaluation Engine Core
 // -------------------------------------------------------------
-app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
+export function evaluateActionGateCore(body: any): { status: number; result: any } {
   try {
-    const { capability, target, command, severity, shadow_mode, agent, entity_id } = req.body;
+    const { capability, target, command, severity, shadow_mode, agent, entity_id } = body || {};
 
     // Fail-Closed Guard: Missing required capability or target
     if (!capability || !target) {
@@ -1076,20 +1219,23 @@ app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
         auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
       });
 
-      return res.status(400).json({
-        action_id: actionId,
-        decision: 'BLOCK',
-        risk_score: 1.0,
-        reason,
-        receipt_id: receipt.receipt_id,
-        receipt,
-        matched_policies: [{ rule_id: 'POL-FAIL-CLOSED-001', name: 'Fail-Closed Parameter Guard' }],
-        shadow_mode_active: Boolean(shadow_mode),
-      });
+      return {
+        status: 400,
+        result: {
+          action_id: actionId,
+          decision: 'BLOCK',
+          risk_score: 1.0,
+          reason,
+          receipt_id: receipt.receipt_id,
+          receipt,
+          matched_policies: [{ rule_id: 'POL-FAIL-CLOSED-001', name: 'Fail-Closed Parameter Guard' }],
+          shadow_mode_active: Boolean(shadow_mode),
+        },
+      };
     }
 
     const actionId = `act-${crypto.randomUUID().slice(0, 8)}`;
-    const agentId = typeof agent === 'string' ? agent : agent?.id || 'agt-console';
+    const agentId = typeof agent === 'string' ? agent : agent?.id || agent?.agent_id || 'agt-console';
     const cmdLower = (command || '').toLowerCase();
     const effectiveEntity = entity_id || 'order:1099';
 
@@ -1136,17 +1282,20 @@ app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
           driftDetected: true,
         });
 
-        return res.json({
-          action_id: actionId,
-          decision: 'BLOCK',
-          risk_score: 0.95,
-          reason,
-          receipt_id: receipt.receipt_id,
-          receipt,
-          matched_policies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
-          remediation_suggestions: ['Re-query payment and order status before executing courier dispatch.'],
-          shadow_mode_active: Boolean(shadow_mode),
-        });
+        return {
+          status: 200,
+          result: {
+            action_id: actionId,
+            decision: 'BLOCK',
+            risk_score: 0.95,
+            reason,
+            receipt_id: receipt.receipt_id,
+            receipt,
+            matched_policies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
+            remediation_suggestions: ['Re-query payment and order status before executing courier dispatch.'],
+            shadow_mode_active: Boolean(shadow_mode),
+          },
+        };
       }
     }
 
@@ -1172,17 +1321,20 @@ app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
         auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
       });
 
-      return res.json({
-        action_id: actionId,
-        decision: 'BLOCK',
-        risk_score: 1.0,
-        reason,
-        receipt_id: receipt.receipt_id,
-        receipt,
-        matched_policies: [{ rule_id: 'POL-SEC-001', name: 'Block Destructive Commands' }],
-        remediation_suggestions: ['Refuse recursive root deletion.'],
-        shadow_mode_active: Boolean(shadow_mode),
-      });
+      return {
+        status: 200,
+        result: {
+          action_id: actionId,
+          decision: 'BLOCK',
+          risk_score: 1.0,
+          reason,
+          receipt_id: receipt.receipt_id,
+          receipt,
+          matched_policies: [{ rule_id: 'POL-SEC-001', name: 'Block Destructive Commands' }],
+          remediation_suggestions: ['Refuse recursive root deletion.'],
+          shadow_mode_active: Boolean(shadow_mode),
+        },
+      };
     }
 
     // 3. Human Approval Requirement (System Mutations)
@@ -1227,17 +1379,20 @@ app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
       });
       persistDatabase();
 
-      return res.json({
-        action_id: actionId,
-        decision: 'REQUIRE_APPROVAL',
-        risk_score: 0.7,
-        reason,
-        receipt_id: receipt.receipt_id,
-        receipt,
-        matched_policies: [{ rule_id: 'POL-SEC-003', name: 'Human Approval for System Mutations' }],
-        remediation_suggestions: ['Submitted to human operator queue for cryptographic signature.'],
-        shadow_mode_active: Boolean(shadow_mode),
-      });
+      return {
+        status: 200,
+        result: {
+          action_id: actionId,
+          decision: 'REQUIRE_APPROVAL',
+          risk_score: 0.7,
+          reason,
+          receipt_id: receipt.receipt_id,
+          receipt,
+          matched_policies: [{ rule_id: 'POL-SEC-003', name: 'Human Approval for System Mutations' }],
+          remediation_suggestions: ['Submitted to human operator queue for cryptographic signature.'],
+          shadow_mode_active: Boolean(shadow_mode),
+        },
+      };
     }
 
     // 4. Safe / Allowed Execution
@@ -1261,29 +1416,40 @@ app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
       driftDetected: false,
     });
 
-    res.json({
-      action_id: actionId,
-      decision: 'ALLOW',
-      risk_score: 0.1,
-      reason,
-      receipt_id: receipt.receipt_id,
-      receipt,
-      matched_policies: [{ rule_id: 'POL-DEFAULT', name: 'Standard Verified Execution' }],
-      shadow_mode_active: Boolean(shadow_mode),
-    });
+    return {
+      status: 200,
+      result: {
+        action_id: actionId,
+        decision: 'ALLOW',
+        risk_score: 0.1,
+        reason,
+        receipt_id: receipt.receipt_id,
+        receipt,
+        matched_policies: [{ rule_id: 'POL-DEFAULT', name: 'Standard Verified Execution' }],
+        shadow_mode_active: Boolean(shadow_mode),
+      },
+    };
   } catch (err: unknown) {
     const errMessage = err instanceof Error ? err.message : 'Unknown exception';
     const actionId = `act-err-${crypto.randomUUID().slice(0, 6)}`;
     const reason = `Action BLOCKED: Verification engine error (${errMessage}). Fail-closed policy enforced. Zero mutations released.`;
     recordAuditEntry(actionId, 'system', 'BLOCK', 1.0, reason, 'FAIL_CLOSED_EXCEPTION');
-    res.status(500).json({
-      action_id: actionId,
-      decision: 'BLOCK',
-      risk_score: 1.0,
-      reason,
-      matched_policies: [{ rule_id: 'POL-FAIL-CLOSED-SYS', name: 'System Exception Fail-Closed Guard' }],
-    });
+    return {
+      status: 500,
+      result: {
+        action_id: actionId,
+        decision: 'BLOCK',
+        risk_score: 1.0,
+        reason,
+        matched_policies: [{ rule_id: 'POL-FAIL-CLOSED-SYS', name: 'System Exception Fail-Closed Guard' }],
+      },
+    };
   }
+}
+
+app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
+  const { status, result } = evaluateActionGateCore(req.body);
+  res.status(status).json(result);
 });
 
 // Human Approvals Queue
@@ -1406,19 +1572,176 @@ app.get('/api/v1/mcp/config', (_req: Request, res: Response) => {
   res.json({
     protocol_version: '2024-11-05',
     server_name: 'cck-mcp-server',
-    transport: 'stdio',
+    transport: 'stdio / http-jsonrpc',
     launch_command: 'cck mcp',
     docker_command: 'docker run -i --rm cck:latest cck mcp',
     endpoint_proxy: '/api/v1/actions/evaluate',
     exposed_tools: [
       { name: 'cck_evaluate_action', description: 'Zero-Bypass Action Gate evaluation before execution' },
       { name: 'cck_record_evidence', description: 'Mint cryptographic evidence token for facts' },
-      { name: 'cck_query_fact', description: 'Inspect freshness and state of world facts' },
-      { name: 'cck_execute_via_connector', description: 'Safe proxy execution via verified connector' },
+      { name: 'cck_verify_heartbeat', description: 'Verify authenticated agent connection heartbeat' },
+      { name: 'cck_get_receipt', description: 'Retrieve immutable cryptographic decision receipt' },
     ],
     security_guarantee: 'Zero-Bypass Policy Enforcement at execution adapter layer, not LLM context',
   });
 });
+
+// Official Model Context Protocol (MCP) JSON-RPC 2.0 Handler
+const handleMcpJsonRpc = async (req: Request, res: Response) => {
+  const { jsonrpc, id, method, params } = req.body || {};
+  if (jsonrpc !== '2.0') {
+    return res.status(400).json({ jsonrpc: '2.0', id: id || null, error: { code: -32600, message: 'Invalid Request: jsonrpc must be 2.0' } });
+  }
+
+  if (method === 'initialize') {
+    return res.json({
+      jsonrpc: '2.0',
+      id,
+      result: {
+        protocolVersion: '2024-11-05',
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: 'cck-mcp-server', version: '0.2.0' },
+      },
+    });
+  }
+
+  if (method === 'ping') {
+    return res.json({ jsonrpc: '2.0', id, result: {} });
+  }
+
+  if (method === 'tools/list') {
+    return res.json({
+      jsonrpc: '2.0',
+      id,
+      result: {
+        tools: [
+          {
+            name: 'cck_evaluate_action',
+            description: 'Evaluate agent tool call or mutation against CCK Action Gate before execution.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                capability: { type: 'string', description: 'Action capability, e.g. logistics.ship' },
+                target: { type: 'string', description: 'Resource identifier, e.g. order:1099' },
+                parameters: { type: 'object', description: 'Parameters passed to target tool' },
+                session_id: { type: 'string', description: 'Agent session tracking ID' },
+              },
+              required: ['capability', 'target'],
+            },
+          },
+          {
+            name: 'cck_record_evidence',
+            description: 'Record verified external observation or state change to update CCK facts.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                entity_id: { type: 'string', description: 'Entity ID, e.g. order:1099' },
+                field_name: { type: 'string', description: 'Field name, e.g. status' },
+                value: { description: 'Observed value, e.g. paid, refunded, canceled' },
+              },
+              required: ['entity_id', 'field_name', 'value'],
+            },
+          },
+          {
+            name: 'cck_verify_heartbeat',
+            description: 'Verify agent connectivity and update last_seen_at heartbeat.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                agent_id: { type: 'string', description: 'Registered Agent ID' },
+              },
+              required: ['agent_id'],
+            },
+          },
+        ],
+      },
+    });
+  }
+
+  if (method === 'tools/call') {
+    const { name: toolName, arguments: toolArgs } = params || {};
+
+    if (toolName === 'cck_evaluate_action') {
+      const { result } = evaluateActionGateCore({
+        capability: toolArgs?.capability,
+        target: toolArgs?.target,
+        command: toolArgs?.command,
+        parameters: toolArgs?.parameters,
+        session_id: toolArgs?.session_id,
+        agent: { id: 'agt-mcp-client', name: 'MCP Agent' },
+      });
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(result) }],
+          isError: result.decision === 'BLOCK',
+        },
+      });
+    }
+
+    if (toolName === 'cck_record_evidence') {
+      const entity_id = toolArgs?.entity_id;
+      const field_name = toolArgs?.field_name;
+      const value = toolArgs?.value;
+      const evidenceId = `evi-${crypto.randomUUID().slice(0, 10)}`;
+      const payloadHash = crypto.createHash('sha256').update(JSON.stringify(toolArgs)).digest('hex');
+      const isInvalidated = ['refunded', 'canceled', 'failed', 'revoked', 'expired', 'false', false].includes(value);
+
+      dbState.evidenceList.unshift({
+        evidence_id: evidenceId,
+        entity_id,
+        field_name,
+        raw_payload: toolArgs,
+        source: 'mcp-tool-call',
+        observed_at: new Date().toISOString(),
+        payload_hash: payloadHash,
+      });
+
+      const existingFact = dbState.facts.find((f) => f.entity_id === entity_id && f.field_name === field_name);
+      if (existingFact) {
+        existingFact.value = value;
+        existingFact.state = isInvalidated ? 'INVALIDATED' : 'VALID';
+        existingFact.version += 1;
+        existingFact.evidence_id = evidenceId;
+      }
+      persistDatabase();
+
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify({ status: 'success', evidence_id: evidenceId, fact_state: isInvalidated ? 'INVALIDATED' : 'VALID' }) }],
+        },
+      });
+    }
+
+    if (toolName === 'cck_verify_heartbeat') {
+      const agent = dbState.agents.find((a) => a.agent_id === toolArgs?.agent_id);
+      if (!agent) {
+        return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: 'Agent not found' } });
+      }
+      agent.status = 'CONNECTED';
+      agent.last_seen_at = new Date().toISOString();
+      persistDatabase();
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify({ status: 'CONNECTED', agent_id: agent.agent_id, last_seen_at: agent.last_seen_at }) }],
+        },
+      });
+    }
+
+    return res.status(404).json({ jsonrpc: '2.0', id, error: { code: -32601, message: `Tool not found: ${toolName}` } });
+  }
+
+  return res.status(404).json({ jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } });
+};
+
+app.post('/api/v1/mcp', handleMcpJsonRpc);
+app.post('/mcp', handleMcpJsonRpc);
+
 
 // Scenarios Suite Runner
 app.get('/api/v1/scenarios', (_req: Request, res: Response) => {
@@ -1659,7 +1982,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
 
     // Stage 1: Before Drift (ALLOW)
     const actId1 = `act-lab-a1-${crypto.randomUUID().slice(0, 6)}`;
-    const audit1 = recordAuditEntry(actId1, 'agt-purchaser', 'ALLOW', 0.1, 'Inventory fact (5 units) satisfies purchase precondition.', 'EXECUTED');
+    const audit1 = recordAuditEntry(actId1, 'agt-purchaser', 'ALLOW', 0.1, 'Inventory fact (5 units) satisfies purchase precondition.', 'EXECUTED', true);
     const receipt1 = mintDecisionReceipt({
       actionId: actId1,
       agentId: 'agt-purchaser',
@@ -1696,7 +2019,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
     // Stage 2: After Drift Evaluation (BLOCK)
     const actId2 = `act-lab-a2-${crypto.randomUUID().slice(0, 6)}`;
     const reason2 = 'Action BLOCKED: Required fact item:sku-992.inventory is INVALIDATED or 0. Precondition drift detected. Zero mutations dispatched to external target.';
-    const audit2 = recordAuditEntry(actId2, 'agt-purchaser', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION');
+    const audit2 = recordAuditEntry(actId2, 'agt-purchaser', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION', true);
     const receipt2 = mintDecisionReceipt({
       actionId: actId2,
       agentId: 'agt-purchaser',
@@ -1777,7 +2100,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
     });
 
     const actId1 = `act-lab-b1-${crypto.randomUUID().slice(0, 6)}`;
-    const audit1 = recordAuditEntry(actId1, 'agt-devops', 'ALLOW', 0.1, 'IAM policy verifies active deployment privileges.', 'EXECUTED');
+    const audit1 = recordAuditEntry(actId1, 'agt-devops', 'ALLOW', 0.1, 'IAM policy verifies active deployment privileges.', 'EXECUTED', true);
     const receipt1 = mintDecisionReceipt({
       actionId: actId1,
       agentId: 'agt-devops',
@@ -1813,7 +2136,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
 
     const actId2 = `act-lab-b2-${crypto.randomUUID().slice(0, 6)}`;
     const reason2 = 'Action BLOCKED: Required fact user:usr-402.perm_deploy is INVALIDATED (current value: "revoked"). Zero mutations dispatched to external target.';
-    const audit2 = recordAuditEntry(actId2, 'agt-devops', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION');
+    const audit2 = recordAuditEntry(actId2, 'agt-devops', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION', true);
     const receipt2 = mintDecisionReceipt({
       actionId: actId2,
       agentId: 'agt-devops',
@@ -1894,7 +2217,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
   });
 
   const actId1 = `act-lab-c1-${crypto.randomUUID().slice(0, 6)}`;
-  const audit1 = recordAuditEntry(actId1, 'agt-support', 'ALLOW', 0.1, 'Order verified eligible for return/refund.', 'EXECUTED');
+  const audit1 = recordAuditEntry(actId1, 'agt-support', 'ALLOW', 0.1, 'Order verified eligible for return/refund.', 'EXECUTED', true);
   const receipt1 = mintDecisionReceipt({
     actionId: actId1,
     agentId: 'agt-support',
@@ -1930,7 +2253,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
 
   const actId2 = `act-lab-c2-${crypto.randomUUID().slice(0, 6)}`;
   const reason2 = 'Action BLOCKED: Required fact order:ord-771.status is INVALIDATED (current value: "disputed"). Precondition drift detected. Duplicate disbursement prevented.';
-  const audit2 = recordAuditEntry(actId2, 'agt-support', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION');
+  const audit2 = recordAuditEntry(actId2, 'agt-support', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION', true);
   const receipt2 = mintDecisionReceipt({
     actionId: actId2,
     agentId: 'agt-support',

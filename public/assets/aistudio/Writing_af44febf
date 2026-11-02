@@ -1,0 +1,499 @@
+CCK — REAL SAAS IMPLEMENTATION, FIREBASE AUTH, CUSTOMER AGENT CONNECTION, SDK/MCP PACKAGING & HOSTING DECISION
+
+Existing GitHub repository:
+https://github.com/ghazghazibahaeddin-arch/cck
+
+The project currently has a UI running in Google AI Studio Build Preview.
+
+It also has a connected Cloudflare account.
+
+We want to turn CCK into a genuinely usable hosted developer platform.
+
+IMPORTANT: This is NOT a request to redesign the CCK concept or replace its reliability engine.
+
+Preserve the existing CCK core, functionality, contracts, and working integrations.
+
+Do not generate fake customer data, fake agents, fake connection states, fake audit records, fake metrics, or simulated production integrations.
+
+The current Connect Your AI Agent interface is insufficient: choosing LangGraph, OpenAI Agents SDK, CrewAI, MCP, or Custom REST does not establish a real connection.
+
+Your objective is to implement the complete real customer workflow.
+
+1. INSPECT THE ACTUAL REPOSITORY
+
+Inspect the real GitHub repository and its latest source.
+
+Determine:
+
+- Current main branch commit.
+- Whether AI Studio is editing the same GitHub repository.
+- Whether local AI Studio code and GitHub are synchronized.
+- Whether the TypeScript API is the actual hosted application backend.
+- Whether the Python CCK core is required at runtime.
+- Whether both Python and TypeScript engines have verified behavioral parity.
+- Whether there are existing SDK packages or only examples.
+- Whether the MCP Server is executable and tested.
+- Whether Firebase is already provisioned.
+- Whether Firestore is already connected.
+- Whether any customer authentication exists.
+
+Do not duplicate existing implementations.
+
+Do not assume that the presence of source files proves a capability works.
+
+2. ENABLE REAL CUSTOMER AUTHENTICATION
+
+Use Firebase Authentication and Firestore if the account and project support the Google AI Studio Starter Tier.
+
+Implement:
+
+- Sign in with Google.
+- Sign out.
+- Authentication state persistence.
+- Session handling.
+- Protected application routes.
+- Account profile.
+- Workspace creation.
+- Project creation.
+- Project switching.
+- Account deletion workflow where appropriate.
+
+Use Firebase Authentication on the client and verify authentication tokens on the trusted backend.
+
+Do not rely on frontend-only authentication.
+
+Do not allow any unauthenticated user to access private projects or customer data.
+
+Use server-side authorization checks on every protected API route.
+
+If Firebase is not yet provisioned:
+
+Show the official Google AI Studio Firebase setup card so the owner can authorize provisioning and select the project and database region.
+
+Do not attempt to bypass the provisioning step.
+
+Do not request secrets in the AI Studio chat.
+
+Do not expose Firebase Admin credentials in browser code.
+
+3. FIRESTORE DATA MODEL
+
+Implement real persistent collections and access rules.
+
+Suggested logical model:
+
+users
+workspaces
+workspace_members
+projects
+agents
+agent_api_keys
+facts
+evidence
+entities
+dependencies
+policies
+decisions
+receipts
+audit_events
+integration_connections
+webhook_events
+approvals
+
+Adapt this model to the actual CCK domain and existing contracts.
+
+Use server-verified tenant_id, workspace_id, and project_id.
+
+Never trust unverified project or tenant IDs from client requests.
+
+Enforce access control both in backend services and Firestore Security Rules where applicable.
+
+Add tests for:
+
+- Cross-user access.
+- Cross-workspace access.
+- Cross-project access.
+- Unauthorized writes.
+- Revoked sessions.
+- Invalid API keys.
+- Receipt access control.
+
+Firestore is persistent storage, not an authorization system by itself.
+
+4. REBUILD THE CONNECT YOUR AI AGENT FLOW
+
+The existing modal must become a real onboarding workflow.
+
+Step A — Register an agent
+
+Allow the customer to choose:
+
+- Agent name.
+- Framework.
+- Project.
+- Guardrail mode.
+- Target capabilities.
+- Target resources.
+- Freshness policy.
+
+Persist the agent record through the authenticated backend.
+
+Do not mark it connected.
+
+Step B — Generate credentials
+
+Generate:
+
+- Agent ID.
+- Project-scoped API key.
+- Key identifier.
+- Creation timestamp.
+- Initial connection status.
+
+Store the API key securely using an appropriate hash-based verification design.
+
+Display the key only once.
+
+Provide a copy button and explain how to save the key in the customer's own environment variables.
+
+Support revocation and rotation.
+
+Step C — Generate integration instructions
+
+Generate correct instructions for the selected framework.
+
+Provide:
+
+- Actual installation instructions.
+- Correct SDK package.
+- Correct API base URL.
+- Authentication example.
+- Working code.
+- A minimal protected action example.
+- A real connection-test command.
+
+Do not invent SDK package names or function names.
+
+Use only implemented APIs.
+
+Step D — Verify the actual connection
+
+Create a real authenticated connection test.
+
+The customer's code must call CCK from an actual runtime.
+
+A successful API request should:
+
+- Authenticate the agent.
+- Validate the key.
+- Verify project ownership.
+- Record a real heartbeat.
+- Update last_seen_at.
+- Record a genuine connection event.
+
+Only after this succeeds may the agent display CONNECTED.
+
+Otherwise display DISCONNECTED, INVALID_CREDENTIALS, REVOKED, or ERROR.
+
+An agent record alone must never be shown as an active connection.
+
+5. REAL ACTION-GATE ENFORCEMENT
+
+The customer must be able to connect an actual agent.
+
+Implement the complete request path:
+
+Customer agent
+→ CCK SDK
+→ Authenticated CCK API
+→ Authoritative Action Gate
+→ Fact/evidence/dependency verification
+→ Actual verdict
+→ Protected tool execution or block
+→ Persistent audit and receipt.
+
+An agent must not be able to execute the protected action after BLOCK.
+
+REVALIDATE and REQUIRE_APPROVAL must have real documented behavior.
+
+If CCK is unavailable, the protected action must not silently proceed.
+
+Avoid relying on the language model voluntarily calling an extra tool.
+
+Wrap or intercept the actual protected tool execution.
+
+6. BUILD REAL DISTRIBUTABLE SDK PACKAGES
+
+Inspect existing implementations before creating new package directories.
+
+A proper SDK is not merely an example.
+
+Create or complete a real Python SDK package.
+
+It should provide:
+
+- Client initialization.
+- Authentication.
+- Configurable API base URL.
+- Typed request and response models.
+- Fact/evidence registration.
+- Decision evaluation.
+- Protected action wrapper.
+- Receipt retrieval.
+- Connection testing.
+- Safe timeout and retry behavior.
+- Clear error types.
+- Documentation.
+- Automated tests.
+
+Create or complete a real TypeScript SDK package with equivalent functionality.
+
+Use the existing CCK REST API as the integration boundary unless there is a documented architectural reason not to.
+
+The SDK must not independently reimplement the Action Gate.
+
+Prepare valid Python packaging metadata and npm packaging metadata.
+
+Verify that packages can be built locally.
+
+Do not publish to PyPI or npm without the owner's explicit authorization and the required secure publisher setup.
+
+7. MCP SERVER — REAL IMPLEMENTATION
+
+Inspect:
+
+src/cck/mcp/server.py
+examples/mcp_client.ts
+
+Make sure the MCP Server:
+
+- Implements the current official MCP protocol correctly.
+- Exposes actual CCK tools.
+- Authenticates remote requests securely.
+- Uses the same authoritative Action Gate.
+- Supports evidence recording.
+- Supports action evaluation.
+- Handles errors safely.
+- Is tested using a real MCP client.
+
+Implement a suitable local stdio mode for developers.
+
+Prepare a remote HTTP MCP mode if the selected deployment runtime supports it safely.
+
+Do not confuse an MCP Client with an MCP Server.
+
+Provide actual execution instructions.
+
+Prepare a distributable package or executable entry point where appropriate.
+
+Do not claim MCP integration is complete until a real MCP client connects and successfully invokes CCK tools.
+
+8. FIX THE DASHBOARD
+
+The dashboard must have zero fake customer data.
+
+A new account must display truthful empty states.
+
+All counters must be calculated from actual persistent records.
+
+Distinguish clearly between:
+
+- Demo simulations.
+- Actual authenticated agents.
+- Real verifications.
+- Blocked actions.
+- Approval requests.
+- Actual audit events.
+
+Failure Lab simulations must never increase production customer counters.
+
+No fictional agent should appear in the customer's account.
+
+9. HOSTING DECISION — GOOGLE AI STUDIO VS CLOUDFLARE
+
+Do not delete or disconnect Cloudflare.
+
+Audit the exact current project and dependencies.
+
+Evaluate these two architectures:
+
+A. Google AI Studio Build + Cloud Run Starter Tier + Firebase Authentication + Firestore.
+
+B. Cloudflare Pages/Workers + D1, including Python Workers/FastAPI if the actual Python dependencies are compatible.
+
+For option A, verify:
+
+- Google AI Studio's Node.js backend compatibility.
+- Whether the actual CCK TypeScript API can run as the authoritative hosted backend.
+- Whether Python is needed at runtime.
+- Whether Python/TypeScript behavioral parity is sufficient.
+- Firebase Auth token verification.
+- Firestore persistence.
+- Firestore quota assumptions.
+- Starter Tier account eligibility.
+- Cloud Run deployment feasibility.
+
+For option B, verify:
+
+- Python Workers support.
+- Compatibility of the actual Python dependencies.
+- FastAPI runtime compatibility.
+- D1 storage adapter implementation.
+- D1 migrations.
+- Query and write behavior.
+- Worker CPU and request limits.
+- Authentication.
+- Tenant isolation.
+
+Do not simply compare marketing claims.
+
+Run the same representative CCK workload against the selected architecture where possible.
+
+Preferred initial direction
+
+Prefer Google AI Studio Starter Tier for the first hosted developer preview if:
+
+- The actual TypeScript backend can securely host the CCK gate.
+- Existing Python behavior is verified against the same contracts.
+- Firebase Auth and Firestore can support the data model.
+- The account is eligible.
+- Deployment requires no paid resources.
+
+If these conditions do not hold, document why and evaluate Cloudflare Python Workers as the alternative.
+
+Do not run two independent production databases.
+
+Do not create paid resources or add billing details.
+
+Do not migrate or delete customer data without authorization.
+
+10. CONNECT CUSTOMER DATA SOURCES
+
+Implement one genuine integration path first.
+
+It may use an authenticated REST API and verified Webhooks.
+
+A real provider connector must:
+
+- Authenticate.
+- Validate provider identity.
+- Verify webhook signatures.
+- Prevent duplicate event processing.
+- Store incoming events.
+- Update CCK facts and evidence.
+- Invalidate affected evidence when appropriate.
+- Trigger the actual dependency and action revalidation path.
+- Record the source and timestamp.
+- Show its real connection state.
+
+Do not claim Stripe, Shopify, Okta, or any third-party provider is connected without successful authorized testing.
+
+Clearly label unconfigured integrations.
+
+11. GOOGLE AI STUDIO PREVIEW VS LIVE APP
+
+The current Preview is not itself the public production deployment.
+
+Prepare the application for Publish.
+
+Check:
+
+- Production frontend build.
+- Backend runtime.
+- Firebase configuration.
+- Authentication.
+- Firestore Rules.
+- Environment configuration.
+- Health endpoint.
+- Protected API endpoints.
+- Mobile responsive behavior.
+- Failure Lab isolation.
+- Connection flow.
+- Real customer data persistence.
+
+Do not tell the owner to publish until the acceptance test succeeds.
+
+Once all checks pass, provide the exact manual Publish steps.
+
+12. END-TO-END ACCEPTANCE TEST
+
+Use a real test account and isolated project.
+
+Execute:
+
+1. Register a new customer.
+2. Sign in.
+3. Create a workspace and project.
+4. Register an agent.
+5. Generate an API key.
+6. Connect an actual test agent using the SDK.
+7. Send an authenticated connection request.
+8. Register a valid fact and evidence.
+9. Execute a protected action through CCK.
+10. Verify ALLOW and actual tool execution.
+11. Change the underlying fact through a verified webhook.
+12. Repeat the protected action.
+13. Verify BLOCK or REVALIDATE.
+14. Confirm the protected tool did not execute.
+15. Retrieve the real persisted receipt.
+16. Confirm the audit event exists.
+17. Sign in as a second customer.
+18. Confirm the second customer cannot access the first customer's data.
+19. Restart or redeploy.
+20. Verify that the records still exist.
+
+Run the same logical scenarios through Python and TypeScript implementations.
+
+Report all failures.
+
+13. GITHUB RELEASE
+
+Do not publish a stable GitHub Release yet.
+
+After the actual customer workflow passes:
+
+- Synchronize the correct source.
+- Run all tests.
+- Create a preview release tag.
+- Write accurate release notes.
+- Clearly label it as prerelease.
+- Include installation and integration instructions.
+
+Do not claim package publication until Python or npm packages are actually published.
+
+14. FINAL REPORT
+
+Report each feature as:
+
+- REAL AND VERIFIED.
+- IMPLEMENTED BUT NOT CONNECTED.
+- SIMULATED DEMO.
+- NOT IMPLEMENTED.
+
+Include:
+
+- Exact repository commit.
+- Runtime architecture.
+- Firebase configuration status.
+- Authentication status.
+- Firestore persistence.
+- Real SDK package locations.
+- Python and npm package build status.
+- MCP Server test results.
+- Agent connection test.
+- Webhook test results.
+- Tenant isolation test results.
+- Action Gate enforcement tests.
+- Deployment URL.
+- Remaining manual owner actions.
+- Known limitations.
+
+The target is one real customer successfully connecting one real test agent to the hosted CCK service and receiving a real persisted Action Gate verdict.
+
+Do not add more decorative UI before this complete workflow works.
+
+Do not fabricate a successful connection.
+
+Do not claim that a form submission is an agent connection.
+
+Do not claim that the product is production-ready without proof.

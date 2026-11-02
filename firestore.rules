@@ -1,0 +1,67 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // User profiles
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId);
+    }
+
+    // Workspaces
+    match /workspaces/{workspaceId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.resource.data.owner_uid == request.auth.uid;
+      allow update, delete: if isAuthenticated() && resource.data.owner_uid == request.auth.uid;
+    }
+
+    // Projects
+    match /projects/{projectId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    // Agents
+    match /agents/{agentId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Facts and Evidence
+    match /facts/{factId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    match /evidence/{evidenceId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    // Decision Receipts (Publicly shareable via receipt ID for verification, write only via server/auth)
+    match /receipts/{receiptId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // Audit Events
+    match /audit_events/{eventId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if false; // Append-only immutable audit trail
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

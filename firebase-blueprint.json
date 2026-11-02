@@ -1,0 +1,101 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Registered CCK developer user account",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "developer", "operator"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Workspace": {
+      "title": "Workspace",
+      "description": "Developer workspace organization for CCK projects",
+      "type": "object",
+      "properties": {
+        "workspace_id": { "type": "string" },
+        "name": { "type": "string" },
+        "owner_uid": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["workspace_id", "name", "owner_uid"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "CCK project namespace isolating agents, facts, and audit ledgers",
+      "type": "object",
+      "properties": {
+        "project_id": { "type": "string" },
+        "workspace_id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "tenant_id": { "type": "string" },
+        "rate_limit_per_minute": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["project_id", "name"]
+    },
+    "Agent": {
+      "title": "Agent",
+      "description": "Connected AI Agent instance guarded by CCK Action Gate",
+      "type": "object",
+      "properties": {
+        "agent_id": { "type": "string" },
+        "project_id": { "type": "string" },
+        "name": { "type": "string" },
+        "framework": { "type": "string" },
+        "target_capability": { "type": "string" },
+        "target_resource": { "type": "string" },
+        "guardrail_mode": { "type": "string" },
+        "freshness_ttl_seconds": { "type": "number" },
+        "status": { "type": "string", "enum": ["CONNECTED", "DISCONNECTED", "REVOKED", "ERROR"] },
+        "last_seen_at": { "type": "string" },
+        "total_evaluations": { "type": "number" },
+        "blocked_evaluations": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["agent_id", "project_id", "name", "target_capability"]
+    },
+    "DecisionReceipt": {
+      "title": "DecisionReceipt",
+      "description": "Cryptographically linked CCK Decision Receipt",
+      "type": "object",
+      "properties": {
+        "receipt_id": { "type": "string" },
+        "action_id": { "type": "string" },
+        "agent_id": { "type": "string" },
+        "project_id": { "type": "string" },
+        "status": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["receipt_id", "action_id", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles indexed by UID"
+    },
+    "/workspaces/{workspaceId}": {
+      "schema": "Workspace",
+      "description": "Workspaces created by users"
+    },
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "CCK projects with tenant isolation"
+    },
+    "/agents/{agentId}": {
+      "schema": "Agent",
+      "description": "Connected agents"
+    },
+    "/receipts/{receiptId}": {
+      "schema": "DecisionReceipt",
+      "description": "Decision receipts with cryptographic proof"
+    }
+  }
+}
