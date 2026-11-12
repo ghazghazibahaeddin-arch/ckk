@@ -2,7 +2,9 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper functions
+    // -------------------------------------------------------------
+    // Helper Functions & Security Guards
+    // -------------------------------------------------------------
     function isAuthenticated() {
       return request.auth != null;
     }
@@ -11,55 +13,126 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    // User profiles
+    function isDocSizeValid(maxFields) {
+      return request.resource.data.size() <= maxFields;
+    }
+
+    // -------------------------------------------------------------
+    // User Profiles & Roles
+    // -------------------------------------------------------------
     match /users/{userId} {
       allow read: if isAuthenticated();
-      allow write: if isOwner(userId);
+      allow create: if isOwner(userId)
+                    && request.resource.data.id == userId
+                    && isDocSizeValid(15);
+      allow update: if isOwner(userId)
+                    && request.resource.data.id == userId
+                    && request.resource.data.created_at == resource.data.created_at
+                    && isDocSizeValid(15);
+      allow delete: if false;
     }
 
-    // Workspaces
+    // -------------------------------------------------------------
+    // Multi-Tenant Workspaces
+    // -------------------------------------------------------------
     match /workspaces/{workspaceId} {
-      allow read: if isAuthenticated();
-      allow create: if isAuthenticated() && request.resource.data.owner_uid == request.auth.uid;
-      allow update, delete: if isAuthenticated() && resource.data.owner_uid == request.auth.uid;
+      allow read: if isAuthenticated() && (resource.data.owner_uid == request.auth.uid || resource.data.members.hasAny([request.auth.uid]));
+      allow create: if isAuthenticated()
+                    && request.resource.data.workspace_id == workspaceId
+                    && request.resource.data.owner_uid == request.auth.uid
+                    && isDocSizeValid(15);
+      allow update: if isAuthenticated()
+                    && resource.data.owner_uid == request.auth.uid
+                    && request.resource.data.owner_uid == resource.data.owner_uid
+                    && isDocSizeValid(15);
+      allow delete: if isAuthenticated() && resource.data.owner_uid == request.auth.uid;
     }
 
-    // Projects
+    // -------------------------------------------------------------
+    // Projects (Scoped to Workspace/Owner)
+    // -------------------------------------------------------------
     match /projects/{projectId} {
       allow read: if isAuthenticated();
-      allow write: if isAuthenticated();
+      allow create: if isAuthenticated()
+                    && request.resource.data.project_id == projectId
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.name.size() <= 100
+                    && isDocSizeValid(20);
+      allow update: if isAuthenticated()
+                    && request.resource.data.project_id == resource.data.project_id
+                    && request.resource.data.created_at == resource.data.created_at
+                    && isDocSizeValid(20);
+      allow delete: if isAuthenticated();
     }
 
-    // Agents
+    // -------------------------------------------------------------
+    // AI Agents Registry
+    // -------------------------------------------------------------
     match /agents/{agentId} {
-      allow read, write: if isAuthenticated();
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated()
+                    && request.resource.data.agent_id == agentId
+                    && request.resource.data.name is string
+                    && request.resource.data.target_capability is string
+                    && isDocSizeValid(25);
+      allow update: if isAuthenticated()
+                    && request.resource.data.agent_id == resource.data.agent_id
+                    && request.resource.data.created_at == resource.data.created_at
+                    && isDocSizeValid(25);
+      allow delete: if isAuthenticated();
     }
 
-    // Facts and Evidence
+    // -------------------------------------------------------------
+    // Facts & Cryptographic Evidence
+    // -------------------------------------------------------------
     match /facts/{factId} {
       allow read: if isAuthenticated();
-      allow write: if isAuthenticated();
+      allow create, update: if isAuthenticated()
+                            && request.resource.data.entity_id is string
+                            && request.resource.data.field_name is string
+                            && isDocSizeValid(20);
+      allow delete: if isAuthenticated();
     }
 
     match /evidence/{evidenceId} {
       allow read: if isAuthenticated();
-      allow write: if isAuthenticated();
+      allow create: if isAuthenticated()
+                    && request.resource.data.evidence_id == evidenceId
+                    && request.resource.data.payload_hash is string
+                    && isDocSizeValid(20);
+      allow update, delete: if false; // Evidence is immutable once observed
     }
 
-    // Decision Receipts (Publicly shareable via receipt ID for verification, write only via server/auth)
+    // -------------------------------------------------------------
+    // Decision Receipts (Shareable Verification Artifacts)
+    // -------------------------------------------------------------
     match /receipts/{receiptId} {
+      // Publicly verifiable by cryptographic receipt ID
       allow read: if true;
-      allow write: if isAuthenticated();
+      allow create: if isAuthenticated()
+                    && request.resource.data.receipt_id == receiptId
+                    && request.resource.data.verdict != null
+                    && isDocSizeValid(30);
+      allow update, delete: if false; // Decision receipts are immutable
     }
 
-    // Audit Events
+    // -------------------------------------------------------------
+    // Audit Ledger (Strict Append-Only Immutable Chain)
+    // -------------------------------------------------------------
     match /audit_events/{eventId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated();
-      allow update, delete: if false; // Append-only immutable audit trail
+      allow create: if isAuthenticated()
+                    && request.resource.data.audit_id == eventId
+                    && request.resource.data.action_hash is string
+                    && request.resource.data.previous_hash is string
+                    && isDocSizeValid(25);
+      allow update, delete: if false; // Immutable tamper-evident audit ledger
     }
 
-    // Default deny
+    // -------------------------------------------------------------
+    // Default Deny Catchall
+    // -------------------------------------------------------------
     match /{document=**} {
       allow read, write: if false;
     }

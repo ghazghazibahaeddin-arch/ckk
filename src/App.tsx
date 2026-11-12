@@ -54,9 +54,42 @@ import {
   Gauge,
   ArrowRight,
   Bot,
+  GitMerge,
+  Wallet,
+  FileCheck2,
 } from 'lucide-react';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { signInWithGoogle, signOutUser, subscribeToAuth } from './firebase';
+import { ContractsView } from './components/assurance/ContractsView';
+import { ConflictsView } from './components/assurance/ConflictsView';
+import { MandatesView } from './components/assurance/MandatesView';
+import { SkillsRegistryView } from './components/assurance/SkillsRegistryView';
+import { EvaluationsView } from './components/assurance/EvaluationsView';
+import { IncidentsView } from './components/assurance/IncidentsView';
+import { DelegationsView } from './components/governance/DelegationsView';
+import { BudgetGuardView } from './components/governance/BudgetGuardView';
+import { McpGovernanceView } from './components/governance/McpGovernanceView';
+import { CapabilityEvidenceView } from './components/governance/CapabilityEvidenceView';
+import type {
+  ActionContractRecord,
+  ContractExecutionRecord,
+  FactVersionHistoryRecord,
+  ConflictRecord,
+  RevalidationNoticeRecord,
+  AgentMandateRecord,
+  BusinessInvariantRule,
+  SkillRecord,
+  SkillImpactReceiptRecord,
+  IncidentRecord,
+  CorrectionPackRecord,
+  ReplayPackRecord,
+} from './assurance/types';
+import type {
+  DelegationRecord,
+  BudgetPolicyRecord,
+  McpServerRecord,
+  CapabilityEvidenceReceiptRecord,
+} from './governance/types';
 
 // -------------------------------------------------------------
 // Type Definitions
@@ -262,6 +295,16 @@ interface DecisionReceiptItem {
 
 type NavSection =
   | 'overview'
+  | 'delegations'
+  | 'budgets'
+  | 'mcp_governance'
+  | 'capabilities'
+  | 'contracts'
+  | 'conflicts'
+  | 'mandates'
+  | 'skills'
+  | 'evaluations'
+  | 'incidents'
   | 'agents'
   | 'failurelab'
   | 'receipts'
@@ -283,6 +326,26 @@ export default function App() {
   const [activeSection, setActiveSection] = useState<NavSection>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+
+  // CCK Decision Integrity Assurance State
+  const [contracts, setContracts] = useState<ActionContractRecord[]>([]);
+  const [contractExecutions, setContractExecutions] = useState<ContractExecutionRecord[]>([]);
+  const [factHistory, setFactHistory] = useState<FactVersionHistoryRecord[]>([]);
+  const [conflicts, setConflicts] = useState<ConflictRecord[]>([]);
+  const [revalidations, setRevalidations] = useState<RevalidationNoticeRecord[]>([]);
+  const [mandates, setMandates] = useState<AgentMandateRecord[]>([]);
+  const [invariants, setInvariants] = useState<BusinessInvariantRule[]>([]);
+  const [skills, setSkills] = useState<SkillRecord[]>([]);
+  const [skillReceipts, setSkillReceipts] = useState<SkillImpactReceiptRecord[]>([]);
+  const [incidents, setIncidents] = useState<IncidentRecord[]>([]);
+  const [correctionPacks, setCorrectionPacks] = useState<CorrectionPackRecord[]>([]);
+  const [replayPacks, setReplayPacks] = useState<ReplayPackRecord[]>([]);
+
+  // CCK Advanced Agent Governance State
+  const [delegations, setDelegations] = useState<DelegationRecord[]>([]);
+  const [budgets, setBudgets] = useState<BudgetPolicyRecord[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([]);
+  const [capabilityEvidence, setCapabilityEvidence] = useState<CapabilityEvidenceReceiptRecord[]>([]);
 
   // Backend Health & System Status
   const [isBackendLive, setIsBackendLive] = useState<boolean>(false);
@@ -343,10 +406,11 @@ export default function App() {
   const [heartbeatSuccess, setHeartbeatSuccess] = useState<boolean | null>(null);
   const [heartbeatPayload, setHeartbeatPayload] = useState<any>(null);
 
-  // API Keys State
   const [apiKeys, setApiKeys] = useState<ApiKeyItem[]>([]);
   const [newlyCreatedKey, setNewlyCreatedKey] = useState<ApiKeyItem | null>(null);
   const [newKeyName, setNewKeyName] = useState('Agent Integration Token');
+  const [confirmRevokeKeyId, setConfirmRevokeKeyId] = useState<string | null>(null);
+  const [confirmDeleteAgentId, setConfirmDeleteAgentId] = useState<string | null>(null);
 
   // Facts & Evidence State
   const [facts, setFacts] = useState<FactItem[]>([]);
@@ -645,6 +709,65 @@ export default function App() {
     }
   }, []);
 
+  const fetchAssuranceData = useCallback(async () => {
+    try {
+      const [
+        contractsRes,
+        executionsRes,
+        historyRes,
+        conflictsRes,
+        revalsRes,
+        mandatesRes,
+        invariantsRes,
+        skillsRes,
+        impactRes,
+        incidentsRes,
+        correctionsRes,
+        replayPacksRes,
+        delegationsRes,
+        budgetsRes,
+        mcpServersRes,
+        capabilityRes,
+      ] = await Promise.all([
+        fetch('/api/v1/contracts').catch(() => null),
+        fetch('/api/v1/contracts/executions').catch(() => null),
+        fetch('/api/v1/facts/history').catch(() => null),
+        fetch('/api/v1/conflicts').catch(() => null),
+        fetch('/api/v1/revalidations').catch(() => null),
+        fetch('/api/v1/mandates').catch(() => null),
+        fetch('/api/v1/invariants').catch(() => null),
+        fetch('/api/v1/skills').catch(() => null),
+        fetch('/api/v1/skills/impact-receipts').catch(() => null),
+        fetch('/api/v1/incidents').catch(() => null),
+        fetch('/api/v1/incidents/corrections').catch(() => null),
+        fetch('/api/v1/incidents/replay-packs').catch(() => null),
+        fetch('/api/v1/delegations').catch(() => null),
+        fetch('/api/v1/budgets').catch(() => null),
+        fetch('/api/v1/mcp/servers').catch(() => null),
+        fetch('/api/v1/capability-evidence').catch(() => null),
+      ]);
+
+      if (contractsRes?.ok) setContracts(await contractsRes.json());
+      if (executionsRes?.ok) setContractExecutions(await executionsRes.json());
+      if (historyRes?.ok) setFactHistory(await historyRes.json());
+      if (conflictsRes?.ok) setConflicts(await conflictsRes.json());
+      if (revalsRes?.ok) setRevalidations(await revalsRes.json());
+      if (mandatesRes?.ok) setMandates(await mandatesRes.json());
+      if (invariantsRes?.ok) setInvariants(await invariantsRes.json());
+      if (skillsRes?.ok) setSkills(await skillsRes.json());
+      if (impactRes?.ok) setSkillReceipts(await impactRes.json());
+      if (incidentsRes?.ok) setIncidents(await incidentsRes.json());
+      if (correctionsRes?.ok) setCorrectionPacks(await correctionsRes.json());
+      if (replayPacksRes?.ok) setReplayPacks(await replayPacksRes.json());
+      if (delegationsRes?.ok) setDelegations(await delegationsRes.json());
+      if (budgetsRes?.ok) setBudgets(await budgetsRes.json());
+      if (mcpServersRes?.ok) setMcpServers(await mcpServersRes.json());
+      if (capabilityRes?.ok) setCapabilityEvidence(await capabilityRes.json());
+    } catch (err) {
+      console.warn('Failed to fetch assurance data', err);
+    }
+  }, []);
+
   // Online / Offline Fail-Closed Network Monitor
   useEffect(() => {
     const handleOnline = () => {
@@ -678,11 +801,13 @@ export default function App() {
     fetchScenarios();
     fetchMcpConfig();
     fetchReceipts();
+    fetchAssuranceData();
 
     const interval = setInterval(() => {
       fetchStatus();
       fetchReceipts();
       fetchAgents();
+      fetchAssuranceData();
     }, 12000);
     return () => clearInterval(interval);
   }, [
@@ -699,6 +824,7 @@ export default function App() {
     fetchScenarios,
     fetchMcpConfig,
     fetchReceipts,
+    fetchAssuranceData,
   ]);
 
   // Project keys refresh on project switch
@@ -821,8 +947,7 @@ export default function App() {
   // -----------------------------------------------------------
   // Revoke API Key
   // -----------------------------------------------------------
-  const handleRevokeApiKey = async (keyId: string) => {
-    if (!window.confirm('Are you sure you want to revoke this API key immediately?')) return;
+  const executeRevokeApiKey = async (keyId: string) => {
     try {
       const res = await fetch(`/api/v1/projects/${activeProjectId}/keys/${keyId}`, {
         method: 'DELETE',
@@ -833,6 +958,8 @@ export default function App() {
       }
     } catch {
       showNotification('Failed to revoke key', 'error');
+    } finally {
+      setConfirmRevokeKeyId(null);
     }
   };
 
@@ -1006,18 +1133,41 @@ export default function App() {
     }
   };
 
-  const handleDeleteAgent = async (agentId: string) => {
-    if (!window.confirm('Disconnect this agent?')) return;
+  const executeDeleteAgent = async (agentId: string) => {
     try {
       const res = await fetch(`/api/v1/agents/${agentId}`, { method: 'DELETE' });
       if (res.ok) {
         setAgents((prev) => prev.filter((a) => a.agent_id !== agentId));
-        showNotification('Agent disconnected.', 'info');
+        showNotification('Agent permanently deleted and resources purged.', 'info');
         fetchStatus();
+      } else {
+        showNotification('Failed to delete agent', 'error');
       }
     } catch {
-      showNotification('Failed to disconnect agent', 'error');
+      showNotification('Failed to delete agent', 'error');
+    } finally {
+      setConfirmDeleteAgentId(null);
     }
+  };
+
+  const handleDisconnectAgent = async (agentId: string) => {
+    try {
+      const res = await fetch(`/api/v1/agents/${agentId}/disconnect`, { method: 'POST' });
+      if (res.ok) {
+        showNotification('Agent disconnected and API key deauthorized.', 'info');
+        fetchAgents();
+        fetchStatus();
+      } else {
+        showNotification('Failed to disconnect agent.', 'error');
+      }
+    } catch {
+      showNotification('Network error while disconnecting agent.', 'error');
+    }
+  };
+
+  const handleExportAgentData = (agentId: string) => {
+    window.location.href = `/api/v1/agents/${agentId}/export`;
+    showNotification('Exporting agent receipts and audit ledger...', 'success');
   };
 
   // -----------------------------------------------------------
@@ -1305,6 +1455,16 @@ export default function App() {
 
   const navItems = [
     { id: 'overview' as NavSection, label: 'Platform Overview', icon: Activity },
+    { id: 'delegations' as NavSection, label: 'Multi-Hop Delegations', icon: GitMerge, badge: delegations.filter((d) => !d.revoked).length },
+    { id: 'budgets' as NavSection, label: 'Runtime Budget Guard', icon: Wallet, badge: budgets.length },
+    { id: 'mcp_governance' as NavSection, label: 'MCP Server Governance', icon: Server, badge: mcpServers.filter((s) => s.lifecycle_status === 'REVIEW_REQUIRED').length || undefined },
+    { id: 'capabilities' as NavSection, label: 'Capability Proofs', icon: FileCheck2, badge: capabilityEvidence.length },
+    { id: 'contracts' as NavSection, label: 'Action Contracts (EFFECT)', icon: ShieldCheck, badge: contracts.length },
+    { id: 'conflicts' as NavSection, label: 'Evidence & Conflicts (CASCADE)', icon: GitBranch, badge: conflicts.filter((c) => c.status === 'ACTIVE_CONFLICT').length || undefined },
+    { id: 'mandates' as NavSection, label: 'Delegated Mandates & Invariants', icon: Lock, badge: mandates.length },
+    { id: 'skills' as NavSection, label: 'Skill Trust & Integrity', icon: Sparkles, badge: skills.length },
+    { id: 'evaluations' as NavSection, label: 'Skill Impact Evaluations', icon: Gauge, badge: skillReceipts.length },
+    { id: 'incidents' as NavSection, label: 'Incidents & Replay Packs', icon: AlertTriangle, badge: incidents.length },
     { id: 'agents' as NavSection, label: 'Connected AI Agents', icon: Bot, badge: agents.length },
     { id: 'failurelab' as NavSection, label: 'CCK Failure Lab (Demo)', icon: FlaskConical, badge: 'Interactive' },
     { id: 'receipts' as NavSection, label: 'Decision Receipts', icon: FileCheck, badge: receipts.length },
@@ -1595,7 +1755,7 @@ export default function App() {
                   </div>
                   <div className="text-2xl font-bold font-mono text-cyan-400">{agents.length}</div>
                   <div className="text-[11px] text-emerald-400 font-mono mt-1">
-                    {agents.filter((a) => a.status === 'ACTIVE').length} Active &amp; Guarded
+                    {agents.filter((a) => a.status === 'CONNECTED').length} Active &amp; Guarded
                   </div>
                 </div>
 
@@ -1898,13 +2058,31 @@ export default function App() {
                             {togglingAgentId === agent.agent_id ? 'Toggling...' : 'Toggle Drift'}
                           </button>
                         </div>
-                        <button
-                          onClick={() => handleDeleteAgent(agent.agent_id)}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                          title="Disconnect Agent"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center space-x-1">
+                          {agent.status === 'CONNECTED' && (
+                            <button
+                              onClick={() => handleDisconnectAgent(agent.agent_id)}
+                              className="px-2.5 py-1.5 rounded-lg text-slate-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors text-xs flex items-center gap-1 font-mono"
+                              title="Disconnect Agent (Revoke session without deleting data)"
+                            >
+                              <WifiOff className="w-3.5 h-3.5" /> Disconnect
+                            </button>
+                          )}
+                          <button
+                            onClick={() => handleExportAgentData(agent.agent_id)}
+                            className="px-2.5 py-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-cyan-500/10 transition-colors text-xs flex items-center gap-1 font-mono"
+                            title="Export Agent Audit & Capability Receipts"
+                          >
+                            <Download className="w-3.5 h-3.5" /> Export
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteAgentId(agent.agent_id)}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                            title="Permanently Delete Agent"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))}
@@ -2710,7 +2888,7 @@ export default function App() {
                             <td className="py-2.5 px-3 text-center">
                               {k.is_active && (
                                 <button
-                                  onClick={() => handleRevokeApiKey(k.key_id)}
+                                  onClick={() => setConfirmRevokeKeyId(k.key_id)}
                                   className="text-rose-400 hover:text-rose-300 text-xs font-sans hover:underline"
                                 >
                                   Revoke
@@ -3823,6 +4001,139 @@ if (verdict.decision === 'ALLOW') {
               </div>
             </div>
           )}
+
+          {/* ======================================================= */}
+          {/* ADVANCED AGENT GOVERNANCE MODULES */}
+          {/* ======================================================= */}
+          {activeSection === 'delegations' && (
+            <DelegationsView
+              delegations={delegations}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
+
+          {activeSection === 'budgets' && (
+            <BudgetGuardView
+              budgets={budgets}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
+
+          {activeSection === 'mcp_governance' && (
+            <McpGovernanceView
+              servers={mcpServers}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
+
+          {activeSection === 'capabilities' && (
+            <CapabilityEvidenceView
+              receipts={capabilityEvidence}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
+
+          {/* ======================================================= */}
+          {/* ASSURANCE MODULES */}
+          {/* ======================================================= */}
+          {activeSection === 'contracts' && (
+            <ContractsView
+              contracts={contracts}
+              executions={contractExecutions}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
+
+          {activeSection === 'conflicts' && (
+            <ConflictsView
+              conflicts={conflicts}
+              factHistory={factHistory}
+              revalidations={revalidations}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
+
+          {activeSection === 'mandates' && (
+            <MandatesView
+              mandates={mandates}
+              invariants={invariants}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
+
+          {activeSection === 'skills' && (
+            <SkillsRegistryView
+              skills={skills}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
+
+          {activeSection === 'evaluations' && (
+            <EvaluationsView
+              receipts={skillReceipts}
+              skills={skills}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
+
+          {activeSection === 'incidents' && (
+            <IncidentsView
+              incidents={incidents}
+              correctionPacks={correctionPacks}
+              replayPacks={replayPacks}
+              onRefresh={fetchAssuranceData}
+              isDark={isDark}
+              bgCard={bgCard}
+              bgSubtle={bgSubtle}
+              textMuted={textMuted}
+              borderSubtle={borderSubtle}
+            />
+          )}
         </main>
       </div>
 
@@ -4538,6 +4849,72 @@ await withCCKGuard(
                 </form>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal for API Key Revocation */}
+      {confirmRevokeKeyId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fadeIn">
+          <div className={`w-full max-w-md rounded-xl ${bgCard} border ${borderSubtle} p-6 space-y-4 shadow-2xl`}>
+            <div className="flex items-center gap-3 text-rose-400">
+              <Key className="w-6 h-6" />
+              <h3 className="font-bold text-lg text-white">Revoke Agent API Key</h3>
+            </div>
+            <p className="text-sm text-slate-300 leading-relaxed">
+              Are you sure you want to revoke API key <span className="font-mono font-bold text-rose-300">{confirmRevokeKeyId}</span>?
+              Any agent or service using this credential will immediately receive 403 Forbidden responses.
+            </p>
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmRevokeKeyId(null)}
+                className={`px-4 py-2 rounded-lg border ${borderSubtle} text-slate-300 hover:text-white transition-colors`}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => executeRevokeApiKey(confirmRevokeKeyId)}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold transition-colors flex items-center gap-2"
+              >
+                <Key className="w-4 h-4" />
+                Revoke Key Immediately
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal for Permanent Agent Deletion */}
+      {confirmDeleteAgentId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fadeIn">
+          <div className={`w-full max-w-md rounded-xl ${bgCard} border ${borderSubtle} p-6 space-y-4 shadow-2xl`}>
+            <div className="flex items-center gap-3 text-rose-400">
+              <Trash2 className="w-6 h-6" />
+              <h3 className="font-bold text-lg text-white">Permanently Delete Agent</h3>
+            </div>
+            <p className="text-sm text-slate-300 leading-relaxed">
+              Are you sure you want to permanently delete agent <span className="font-mono font-bold text-rose-300">{confirmDeleteAgentId}</span>?
+              All associated delegations and runtime budget policies will be purged. (Tip: Use "Disconnect" instead if you only wish to deauthorize active credentials while retaining records.)
+            </p>
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteAgentId(null)}
+                className={`px-4 py-2 rounded-lg border ${borderSubtle} text-slate-300 hover:text-white transition-colors`}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => executeDeleteAgent(confirmDeleteAgentId)}
+                className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold transition-colors flex items-center gap-2"
+              >
+                <Trash2 className="w-4 h-4" />
+                Delete Agent
+              </button>
+            </div>
           </div>
         </div>
       )}

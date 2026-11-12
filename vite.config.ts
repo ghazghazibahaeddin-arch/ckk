@@ -13,6 +13,7 @@ export default defineConfig(() => {
         registerType: 'autoUpdate',
         manifest: false, // Uses public/manifest.json
         workbox: {
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
           navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/api\/.*/, /^\/health/],

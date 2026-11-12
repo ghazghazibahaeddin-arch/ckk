@@ -14,6 +14,7 @@ describe('CCK Action Gate & Precondition Verification', () => {
         field_name: 'status',
         value: 'paid',
         source: 'test_fixture',
+        force_override: true,
       }),
     });
 

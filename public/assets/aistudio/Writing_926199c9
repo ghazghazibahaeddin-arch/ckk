@@ -1,0 +1,326 @@
+CCK — Full Production Audit, Security Red Team, Bug Fixing & User Experience Verification
+
+I want you to perform a comprehensive technical and product audit of the actual CCK application and its existing codebase.
+
+This is not a redesign task, not a preview task, and not a request to create additional mock screens.
+
+The objective is to make the existing CCK platform reliable, secure, functional, and consistent across all implemented features, integrations, agents, users, and workflows.
+
+Do not simply report problems. Find them, fix them in the actual code, and verify every important fix.
+
+1. Inspect the Complete Existing Product
+
+Inspect the actual application, including:
+
+- Frontend and all user-facing pages.
+- Backend services and API endpoints.
+- Authentication and authorization.
+- Database schemas, persistence, and migrations.
+- Agent registration and connection lifecycle.
+- SDKs and framework integrations.
+- MCP server and client functionality.
+- Action Gate and Policy Engine.
+- Evidence and Fact Registries.
+- Delegation and contextual permissions.
+- Runtime budget controls.
+- Skill Registry and lifecycle.
+- Capability and Skill Impact evaluation.
+- Incident management and replay.
+- Audit logs and execution receipts.
+- Webhooks and external integrations.
+- Deployment configuration and production environment.
+
+Check the real deployed application where access is available and compare it with the source code and deployed commit.
+
+Do not assume a feature works because a page exists or a test is mocked.
+
+2. Conduct a Complete Security Audit
+
+Use OWASP Top 10 for Agentic Applications 2026 and relevant OWASP web/API security guidance as references.
+
+Find and fix:
+
+- Authentication and authorization bypasses.
+- Broken tenant isolation and IDOR vulnerabilities.
+- Privilege escalation.
+- API key leakage and insecure token storage.
+- OAuth scope and consent errors.
+- Missing authorization checks on backend endpoints.
+- SQL/NoSQL injection and unsafe input handling.
+- XSS, CSRF, SSRF, and insecure CORS configurations.
+- Insecure file uploads and unsafe deserialization.
+- Webhook signature verification failures.
+- Replay attacks and duplicate requests.
+- Rate-limit bypasses and resource exhaustion.
+- Dependency vulnerabilities and insecure configurations.
+- Exposed secrets, debug routes, and sensitive logs.
+
+Perform agent-specific security testing:
+
+- Prompt injection through untrusted external content.
+- Tool misuse and excessive agent permissions.
+- Multi-hop delegation privilege escalation.
+- Delegation loops and invalid or expired authorization.
+- MCP tool poisoning and unexpected tool schema changes.
+- Attempts to bypass CCK through direct external API calls.
+- Unauthorized resource access.
+- Data exfiltration through tools.
+- Denial-of-wallet and uncontrolled retries.
+- Insecure skill versions and revoked skill usage.
+- Forged or modified execution and capability receipts.
+
+Pay special attention to the actual enforcement boundary: every protected action must be checked by the backend before the external side effect occurs.
+
+Do not rely on frontend controls or agent prompts as security boundaries.
+
+3. Audit Every Implemented CCK Feature
+
+For every existing feature, inspect its complete execution path from frontend to backend and database.
+
+Verify:
+
+- The feature actually executes.
+- State transitions are valid.
+- Permissions are checked server-side.
+- Data is persisted correctly.
+- Errors are handled safely.
+- Events and audit records are created.
+- The UI reflects actual backend state.
+- Retry and concurrency behavior are correct.
+
+Specifically test:
+
+Agent Management
+
+- Registration, authentication, heartbeat, connection state, disconnection, revocation, and reconnection.
+
+Delegation and Permissions
+
+- Parent-child permission attenuation.
+- Expired and revoked delegation.
+- Contextual resource restrictions.
+- Enforcement at every protected tool call.
+
+Action Assurance
+
+- Action contracts.
+- Idempotency.
+- Concurrency protection.
+- UNKNOWN execution recovery.
+- Result verification.
+- Approval and cancellation flows.
+
+Budget Guard
+
+- Cost estimation.
+- Actual usage recording.
+- Budget enforcement.
+- Retry limits.
+- Concurrent execution limits.
+- Safe stopping when budget is exhausted.
+
+MCP Governance
+
+- Server registration and authentication.
+- Tool inventory changes.
+- Schema changes.
+- Permission changes.
+- Suspension and revocation.
+
+Skill Trust and Impact
+
+- Skill versions, signatures, integrity, expiry, and revocation.
+- Capability receipts.
+- Evaluation reproducibility.
+- Baseline comparison.
+- Safe replay without real external side effects.
+
+Incident and Replay
+
+- Incident creation and traceability.
+- Root-cause records.
+- Correction lifecycle.
+- Replay isolation.
+- Approval before production deployment of corrections.
+
+4. Full User Experience Audit
+
+Test CCK as a real new customer and as an existing customer.
+
+Check the complete journeys:
+
+1. Account creation and sign-in.
+2. Organization or workspace setup.
+3. First-time onboarding.
+4. Registering and connecting an agent.
+5. Connecting an external integration.
+6. Creating, restricting, and revoking permissions.
+7. Configuring policies and budget limits.
+8. Viewing agent activity and audit records.
+9. Reviewing blocked actions and approval requests.
+10. Inspecting execution receipts and skill evaluations.
+11. Handling disconnected services and failed operations.
+12. Disconnecting an agent and deleting or exporting permitted data.
+
+Find and fix:
+
+- Broken buttons and nonfunctional controls.
+- Dead links and incorrect navigation.
+- Incorrect loading, empty, success, and error states.
+- Misleading success messages.
+- Forms that accept invalid data.
+- Poor validation and unclear error messages.
+- UI state that differs from backend state.
+- Missing confirmation before dangerous operations.
+- Inaccessible controls and keyboard navigation problems.
+- Responsive design problems on mobile, tablet, and desktop.
+- Unclear onboarding and integration instructions.
+
+Never show fake metrics or simulated activity as real customer activity.
+
+A successful operation must only be displayed after the backend confirms it.
+
+5. External Integration and API Audit
+
+Inspect whether CCK has a reliable and reusable integration architecture.
+
+Verify and improve, where necessary:
+
+- TypeScript and Python SDK integration boundaries.
+- OpenAPI-based tool integrations.
+- MCP client/server integration.
+- Agent framework middleware and tool execution wrappers.
+- OAuth 2.0/OIDC authorization and scope handling.
+- Signed webhook ingestion and delivery.
+- API authentication, rate limiting, timeout handling, and error responses.
+- Integration health and connection status.
+- Secure credential storage and revocation.
+
+Support two explicit integration modes:
+
+"OBSERVE": collect authorized telemetry and events without blocking actions.
+
+"ENFORCE": route protected actions through CCK and enforce authorization, policies, budgets, and evidence checks.
+
+Do not claim that CCK controls an action if the agent can execute it directly without passing through the enforcement boundary.
+
+Prefer reusable adapters over individually hardcoding every platform.
+
+Do not connect external services without valid configuration and user or administrator consent.
+
+6. Reliability and Data Integrity
+
+Inspect:
+
+- Database transactions and consistency.
+- Tenant isolation.
+- Migrations and rollback safety.
+- Backup and restoration procedures.
+- Queue and event delivery reliability.
+- Idempotent webhook and API handling.
+- Bounded retries and exponential backoff.
+- Timeouts and circuit breakers.
+- Concurrent execution and race conditions.
+- Recovery from partial failures.
+- Token expiration and refresh.
+- Service unavailability and degraded operation.
+- Health checks and monitoring.
+
+Protected actions must fail closed when required authorization or evidence checks cannot be completed.
+
+Do not make unrelated or non-critical dashboard functions fail unnecessarily when an optional service is unavailable.
+
+Never lose an execution result silently or report an uncertain external action as successful.
+
+7. Automated Testing and Real Workflow Verification
+
+Run the existing test suite and add missing tests.
+
+Use:
+
+- Unit tests.
+- API integration tests.
+- Database tests.
+- End-to-end UI tests.
+- Permission and isolation tests.
+- Regression tests.
+- Concurrency tests.
+- Failure and recovery tests.
+- Security negative tests.
+
+Verify actual end-to-end workflows, not just individual functions.
+
+For destructive or financial workflows, use a dedicated test tenant and synthetic records. Never send real customer emails, perform real purchases, issue refunds, delete customer records, or trigger irreversible production actions during testing.
+
+Inspect the deployed production application using read-only and non-destructive checks. Use an authorized canary/test account for any permitted write-path verification.
+
+8. Fix Problems, Not Just Report Them
+
+For every discovered issue:
+
+1. Identify and document the root cause.
+2. Classify severity and user impact.
+3. Fix the issue in the actual source code.
+4. Add a regression test.
+5. Run the relevant test suite again.
+6. Verify that the fix does not break other features.
+
+Prioritize:
+
+- Critical security vulnerabilities.
+- High-impact authorization and tenant isolation problems.
+- Data corruption or loss.
+- Unauthorized agent actions.
+- Duplicate external side effects.
+- Financial and budget enforcement failures.
+- Broken core onboarding or agent connection.
+- Major user-facing workflow failures.
+
+Do not hide errors, weaken policies, remove failing tests, or bypass security controls to make tests pass.
+
+9. Protect Real Users and Production Data
+
+Do not delete, overwrite, reset, or migrate real customer data without a verified backup and an explicitly safe migration plan.
+
+Do not expose credentials in code, logs, reports, browser storage, or Git history.
+
+Do not silently change external permissions or request broader OAuth scopes.
+
+Do not deploy unverified fixes directly to all production users.
+
+For production changes, preserve the existing configuration, create a rollback path, and use a controlled rollout where supported.
+
+Do not claim that an external service is connected unless a real connection test succeeds.
+
+10. Final Verification and Completion Criteria
+
+Do not mark the audit complete until:
+
+- All identified critical and high-severity issues have been fixed or explicitly contained.
+- All core user workflows have been tested.
+- All implemented features have working backend connections.
+- All critical authorization and security tests pass.
+- No known data-loss or unauthorized-action issue remains.
+- No known duplicate-action problem remains in protected workflows.
+- No fake success state or fabricated operational metric remains.
+- The application builds successfully.
+- The automated regression suite passes.
+- The deployed version is consistent with the verified source commit.
+
+At the end, provide a factual report containing:
+
+1. Every vulnerability and bug discovered.
+2. Severity and root cause.
+3. Files and modules changed.
+4. Database and migration changes.
+5. API endpoints affected.
+6. Tests executed and actual pass/fail results.
+7. User journeys verified.
+8. Features that are fully operational.
+9. Remaining external configuration requirements.
+10. Any issue that could not be resolved.
+11. Production rollout and rollback instructions.
+
+Do not invent test results or claim zero vulnerabilities without evidence.
+
+Final objective: CCK must be a genuinely functional, secure, reliable platform for both users and connected AI agents. Fix the actual product, verify the actual implementation, and never trade security or data integrity for a green test result or an attractive interface.
