@@ -18,6 +18,8 @@ interface MandatesViewProps {
   mandates: AgentMandateRecord[];
   invariants: BusinessInvariantRule[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -29,6 +31,8 @@ export const MandatesView: React.FC<MandatesViewProps> = ({
   mandates,
   invariants,
   onRefresh,
+  tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -48,13 +52,16 @@ export const MandatesView: React.FC<MandatesViewProps> = ({
   const handleCreateMandate = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/v1/mandates', {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher('/api/v1/mandates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           agent_id: newForm.agent_id,
+          tenant_id: tenantId,
           spending_limits: {
             total_budget: Number(newForm.total_budget),
+            max_per_action: Number(newForm.single_action_limit),
             single_action_limit: Number(newForm.single_action_limit),
             currency: newForm.currency,
           },
@@ -155,7 +162,9 @@ export const MandatesView: React.FC<MandatesViewProps> = ({
                     </div>
                     <div className="flex items-center justify-between text-[11px] text-slate-400">
                       <span>Single-Action Ceiling:</span>
-                      <span className="font-mono font-semibold text-emerald-400">${m.spending_limits.single_action_limit}</span>
+                      <span className="font-mono font-semibold text-emerald-400">
+                        ${m.spending_limits.max_per_action ?? m.spending_limits.single_action_limit ?? 0}
+                      </span>
                     </div>
                   </div>
 

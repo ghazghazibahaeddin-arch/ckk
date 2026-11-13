@@ -17,6 +17,8 @@ import type { BudgetPolicyRecord, CostEstimate } from '../../governance/types';
 interface BudgetGuardViewProps {
   budgets: BudgetPolicyRecord[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -27,6 +29,8 @@ interface BudgetGuardViewProps {
 export const BudgetGuardView: React.FC<BudgetGuardViewProps> = ({
   budgets,
   onRefresh,
+  tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -63,7 +67,8 @@ export const BudgetGuardView: React.FC<BudgetGuardViewProps> = ({
     e.preventDefault();
     setEstimating(true);
     try {
-      const res = await fetch('/api/v1/budgets/estimate', {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher('/api/v1/budgets/estimate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -86,11 +91,12 @@ export const BudgetGuardView: React.FC<BudgetGuardViewProps> = ({
     e.preventDefault();
     setActionMsg(null);
     try {
-      const res = await fetch('/api/v1/budgets', {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher('/api/v1/budgets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tenant_id: 'tenant_default',
+          tenant_id: tenantId || 'tenant_default',
           scope_type: createForm.scope_type,
           scope_id: createForm.scope_id,
           limits: {
@@ -117,7 +123,8 @@ export const BudgetGuardView: React.FC<BudgetGuardViewProps> = ({
   const handleResetBudget = async (budgetId: string) => {
     setActionMsg(null);
     try {
-      const res = await fetch(`/api/v1/budgets/${budgetId}/reset`, { method: 'POST' });
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/budgets/${budgetId}/reset`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to reset budget');
       setActionMsg({ type: 'success', text: `Budget ${budgetId} reset to 0 spent and restored to ACTIVE.` });

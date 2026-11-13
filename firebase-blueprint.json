@@ -5,23 +5,25 @@
       "description": "Registered CCK developer user account",
       "type": "object",
       "properties": {
-        "uid": { "type": "string" },
-        "email": { "type": "string" },
-        "displayName": { "type": "string" },
-        "role": { "type": "string", "enum": ["admin", "developer", "operator"] },
-        "createdAt": { "type": "string" }
+        "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 254 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["developer", "operator"] },
+        "tenant_id": { "type": "string", "maxLength": 140 },
+        "created_at": { "type": "string", "maxLength": 64 }
       },
-      "required": ["uid", "email"]
+      "required": ["id", "uid", "email"]
     },
     "Workspace": {
       "title": "Workspace",
       "description": "Developer workspace organization for CCK projects",
       "type": "object",
       "properties": {
-        "workspace_id": { "type": "string" },
-        "name": { "type": "string" },
-        "owner_uid": { "type": "string" },
-        "createdAt": { "type": "string" }
+        "workspace_id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 120 },
+        "owner_uid": { "type": "string", "maxLength": 128 },
+        "created_at": { "type": "string", "maxLength": 64 }
       },
       "required": ["workspace_id", "name", "owner_uid"]
     },
@@ -30,72 +32,77 @@
       "description": "CCK project namespace isolating agents, facts, and audit ledgers",
       "type": "object",
       "properties": {
-        "project_id": { "type": "string" },
-        "workspace_id": { "type": "string" },
-        "name": { "type": "string" },
-        "description": { "type": "string" },
-        "tenant_id": { "type": "string" },
+        "project_id": { "type": "string", "maxLength": 128 },
+        "owner_uid": { "type": "string", "maxLength": 128 },
+        "workspace_id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 500 },
+        "tenant_id": { "type": "string", "maxLength": 140 },
         "rate_limit_per_minute": { "type": "number" },
-        "createdAt": { "type": "string" }
+        "created_at": { "type": "string", "maxLength": 64 }
       },
-      "required": ["project_id", "name"]
+      "required": ["project_id", "owner_uid", "name"]
     },
     "Agent": {
       "title": "Agent",
       "description": "Connected AI Agent instance guarded by CCK Action Gate",
       "type": "object",
       "properties": {
-        "agent_id": { "type": "string" },
-        "project_id": { "type": "string" },
-        "name": { "type": "string" },
-        "framework": { "type": "string" },
-        "target_capability": { "type": "string" },
-        "target_resource": { "type": "string" },
-        "guardrail_mode": { "type": "string" },
+        "agent_id": { "type": "string", "maxLength": 128 },
+        "owner_uid": { "type": "string", "maxLength": 128 },
+        "project_id": { "type": "string", "maxLength": 128 },
+        "tenant_id": { "type": "string", "maxLength": 140 },
+        "name": { "type": "string", "maxLength": 120 },
+        "framework": { "type": "string", "maxLength": 64 },
+        "target_capability": { "type": "string", "maxLength": 120 },
+        "target_resource": { "type": "string", "maxLength": 256 },
+        "guardrail_mode": { "type": "string", "maxLength": 64 },
         "freshness_ttl_seconds": { "type": "number" },
-        "status": { "type": "string", "enum": ["CONNECTED", "DISCONNECTED", "REVOKED", "ERROR"] },
-        "last_seen_at": { "type": "string" },
+        "status": { "type": "string", "enum": ["CONNECTED", "DISCONNECTED", "REVOKED", "ERROR", "INVALID_CREDENTIALS"] },
+        "last_seen_at": { "type": "string", "maxLength": 64 },
         "total_evaluations": { "type": "number" },
         "blocked_evaluations": { "type": "number" },
-        "createdAt": { "type": "string" }
+        "created_at": { "type": "string", "maxLength": 64 }
       },
-      "required": ["agent_id", "project_id", "name", "target_capability"]
+      "required": ["agent_id", "owner_uid", "project_id", "name", "target_capability"]
     },
     "DecisionReceipt": {
       "title": "DecisionReceipt",
       "description": "Cryptographically linked CCK Decision Receipt",
       "type": "object",
       "properties": {
-        "receipt_id": { "type": "string" },
-        "action_id": { "type": "string" },
-        "agent_id": { "type": "string" },
-        "project_id": { "type": "string" },
-        "status": { "type": "string" },
-        "timestamp": { "type": "string" }
+        "receipt_id": { "type": "string", "maxLength": 128 },
+        "owner_uid": { "type": "string", "maxLength": 128 },
+        "action_id": { "type": "string", "maxLength": 128 },
+        "agent_id": { "type": "string", "maxLength": 128 },
+        "project_id": { "type": "string", "maxLength": 128 },
+        "tenant_id": { "type": "string", "maxLength": 140 },
+        "status": { "type": "string", "maxLength": 32 },
+        "timestamp": { "type": "string", "maxLength": 64 }
       },
-      "required": ["receipt_id", "action_id", "status"]
+      "required": ["receipt_id", "owner_uid", "action_id", "status"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
-      "description": "User profiles indexed by UID"
+      "description": "Private user profiles indexed by Firebase UID"
     },
     "/workspaces/{workspaceId}": {
       "schema": "Workspace",
-      "description": "Workspaces created by users"
+      "description": "Workspaces owned by authenticated users"
     },
     "/projects/{projectId}": {
       "schema": "Project",
-      "description": "CCK projects with tenant isolation"
+      "description": "CCK projects with strict owner_uid and tenant isolation"
     },
     "/agents/{agentId}": {
       "schema": "Agent",
-      "description": "Connected agents"
+      "description": "Connected AI agents owned by user"
     },
     "/receipts/{receiptId}": {
       "schema": "DecisionReceipt",
-      "description": "Decision receipts with cryptographic proof"
+      "description": "Immutable decision receipts with cryptographic proof"
     }
   }
 }

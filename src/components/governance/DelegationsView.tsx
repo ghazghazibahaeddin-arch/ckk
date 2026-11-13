@@ -21,6 +21,8 @@ import type { DelegationRecord, DelegationChainVerificationResult } from '../../
 interface DelegationsViewProps {
   delegations: DelegationRecord[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -31,6 +33,8 @@ interface DelegationsViewProps {
 export const DelegationsView: React.FC<DelegationsViewProps> = ({
   delegations,
   onRefresh,
+  tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -73,10 +77,12 @@ export const DelegationsView: React.FC<DelegationsViewProps> = ({
     e.preventDefault();
     setActionMsg(null);
     try {
-      const res = await fetch('/api/v1/delegations', {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher('/api/v1/delegations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          tenant_id: tenantId,
           delegator_agent_id: rootForm.delegator_agent_id,
           delegatee_agent_id: rootForm.delegatee_agent_id,
           allowed_actions: rootForm.allowed_actions.split(',').map((s) => s.trim()).filter(Boolean),
@@ -105,10 +111,12 @@ export const DelegationsView: React.FC<DelegationsViewProps> = ({
     if (!parentForSub) return;
     setActionMsg(null);
     try {
-      const res = await fetch(`/api/v1/delegations/${parentForSub.delegation_id}/delegate`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/delegations/${parentForSub.delegation_id}/delegate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          tenant_id: tenantId,
           delegatee_agent_id: subForm.delegatee_agent_id,
           allowed_actions: subForm.allowed_actions.split(',').map((s) => s.trim()).filter(Boolean),
           allowed_resources: subForm.allowed_resources.split(',').map((s) => s.trim()).filter(Boolean),
@@ -133,7 +141,8 @@ export const DelegationsView: React.FC<DelegationsViewProps> = ({
   const executeCascadeRevoke = async (delegationId: string) => {
     setActionMsg(null);
     try {
-      const res = await fetch(`/api/v1/delegations/${delegationId}/revoke`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/delegations/${delegationId}/revoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Manual supervisor cascading revocation via governance console' }),
@@ -155,7 +164,8 @@ export const DelegationsView: React.FC<DelegationsViewProps> = ({
   const handleInspectChain = async (delId: string) => {
     setVerifyingChain(true);
     try {
-      const res = await fetch(`/api/v1/delegations/${delId}`);
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/delegations/${delId}`);
       const data = await res.json();
       setChainResult(data.chain_verification);
     } catch {

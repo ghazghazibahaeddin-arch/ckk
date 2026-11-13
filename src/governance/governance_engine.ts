@@ -8,7 +8,7 @@
  */
 
 import crypto from 'crypto';
-import {
+import type {
   DelegationRecord,
   DelegationChainVerificationResult,
   DelegationScope,
@@ -19,7 +19,7 @@ import {
   McpServerRecord,
   McpToolSchema,
   CapabilityEvidenceReceiptRecord,
-} from './types';
+} from './types.ts';
 
 const HMAC_SECRET = process.env.CCK_SIGNING_SECRET || 'cck_gov_deterministic_kernel_secret_key_v2';
 

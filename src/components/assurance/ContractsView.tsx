@@ -20,6 +20,8 @@ interface ContractsViewProps {
   contracts: ActionContractRecord[];
   executions: ContractExecutionRecord[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -31,6 +33,8 @@ export const ContractsView: React.FC<ContractsViewProps> = ({
   contracts,
   executions,
   onRefresh,
+  tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -69,11 +73,13 @@ export const ContractsView: React.FC<ContractsViewProps> = ({
   const handleCreateContract = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/v1/contracts', {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher('/api/v1/contracts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...newForm,
+          tenant_id: tenantId,
           required_evidence: newForm.required_evidence.split(',').map((s) => s.trim()).filter(Boolean),
           applicable_invariants: newForm.applicable_invariants.split(',').map((s) => s.trim()).filter(Boolean),
         }),
@@ -93,7 +99,8 @@ export const ContractsView: React.FC<ContractsViewProps> = ({
     setExecuting(true);
     setActionResult(null);
     try {
-      const res = await fetch(`/api/v1/contracts/${execForm.contract_id}/execute`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/contracts/${execForm.contract_id}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -120,7 +127,8 @@ export const ContractsView: React.FC<ContractsViewProps> = ({
   const handleProbeExternal = async (executionId: string) => {
     setProbingId(executionId);
     try {
-      const res = await fetch(`/api/v1/contracts/executions/${executionId}/probe-external`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/contracts/executions/${executionId}/probe-external`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ simulated_outcome: 'SUCCEEDED' }),
@@ -138,7 +146,8 @@ export const ContractsView: React.FC<ContractsViewProps> = ({
   const handleCompensate = async (executionId: string) => {
     setCompensatingId(executionId);
     try {
-      const res = await fetch(`/api/v1/contracts/executions/${executionId}/compensate`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/contracts/executions/${executionId}/compensate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Manual supervisor rollback via UI console' }),
@@ -276,7 +285,9 @@ export const ContractsView: React.FC<ContractsViewProps> = ({
                     <td className="py-3 px-4 font-semibold text-slate-200">{c.action_capability || c.permitted_action}</td>
                     <td className="py-3 px-4 text-slate-300">{c.target_resource}</td>
                     <td className="py-3 px-4 text-emerald-400 font-bold">
-                      {c.auth_limit?.spending_ceiling ? `$${c.auth_limit.spending_ceiling}` : 'Unlimited'}
+                      {(c.spending_ceiling ?? c.auth_limit?.max_total_value ?? (c.auth_limit as any)?.spending_ceiling)
+                        ? `$${c.spending_ceiling ?? c.auth_limit?.max_total_value ?? (c.auth_limit as any)?.spending_ceiling}`
+                        : 'Unlimited'}
                     </td>
                     <td className="py-3 px-4 text-slate-400">
                       {c.applicable_invariants?.map((inv) => (

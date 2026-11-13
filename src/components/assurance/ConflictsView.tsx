@@ -22,6 +22,8 @@ interface ConflictsViewProps {
   factHistory: FactVersionHistoryRecord[];
   revalidations: RevalidationNoticeRecord[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -34,6 +36,8 @@ export const ConflictsView: React.FC<ConflictsViewProps> = ({
   factHistory,
   revalidations,
   onRefresh,
+  tenantId: _tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -54,13 +58,15 @@ export const ConflictsView: React.FC<ConflictsViewProps> = ({
     if (!selectedConflict) return;
     setResolving(true);
     try {
-      const res = await fetch(`/api/v1/conflicts/${selectedConflict.conflict_id}/resolve`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/conflicts/${selectedConflict.conflict_id}/resolve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           strategy,
           override_value: strategy === 'MANUAL_SUPERVISOR' ? overrideValue : undefined,
           supervisor_notes: supervisorNotes,
+          note: supervisorNotes,
         }),
       });
       if (res.ok) {

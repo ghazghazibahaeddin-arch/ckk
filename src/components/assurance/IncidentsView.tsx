@@ -23,6 +23,8 @@ interface IncidentsViewProps {
   correctionPacks: CorrectionPackRecord[];
   replayPacks: ReplayPackRecord[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -35,6 +37,8 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
   correctionPacks,
   replayPacks,
   onRefresh,
+  tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -59,11 +63,14 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
   const handleCreateIncident = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/v1/incidents', {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher('/api/v1/incidents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...newIncidentForm,
+          tenant_id: tenantId,
+          description: newIncidentForm.cause_of_failure,
           affected_entities: newIncidentForm.affected_entities.split(',').map((s) => s.trim()).filter(Boolean),
           affected_skills: newIncidentForm.affected_skills.split(',').map((s) => s.trim()).filter(Boolean),
           affected_contracts: newIncidentForm.affected_contracts.split(',').map((s) => s.trim()).filter(Boolean),
@@ -82,7 +89,8 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
     setRunningPackId(replayPackId);
     setReplayOutput(null);
     try {
-      const res = await fetch(`/api/v1/incidents/replay-packs/${replayPackId}/run`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/incidents/replay-packs/${replayPackId}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       });
@@ -99,7 +107,8 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
   const handleApproveCorrection = async (packId: string) => {
     setApprovingPackId(packId);
     try {
-      const res = await fetch(`/api/v1/incidents/corrections/${packId}/approve`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/incidents/corrections/${packId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

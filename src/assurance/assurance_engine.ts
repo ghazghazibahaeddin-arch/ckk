@@ -4,7 +4,7 @@
  */
 
 import crypto from 'crypto';
-import {
+import type {
   ActionContractRecord,
   ContractExecutionRecord,
   FactVersionHistoryRecord,
@@ -123,19 +123,45 @@ export function evaluateBusinessInvariants(params: {
                           capability.toLowerCase().includes('purchase');
 
   if (isPaymentAction) {
-    const duplicate = executions.find(
-      (e) =>
-        e.state === 'SUCCEEDED' &&
-        (e.parameters?.entity_id === effectiveEntity ||
-         e.parameters?.order_id === effectiveEntity ||
-         e.command.includes(effectiveEntity))
-    );
+    const normalizedTarget = (target || '').trim().toLowerCase();
+    const isGatewayDomain =
+      !normalizedTarget ||
+      normalizedTarget.includes('stripe') ||
+      normalizedTarget.startsWith('api.') ||
+      normalizedTarget.startsWith('courier.') ||
+      normalizedTarget.endsWith('.com') ||
+      normalizedTarget.endsWith('.io') ||
+      normalizedTarget.endsWith('.charges');
+
+    const explicitOrder = parameters?.entity_id || parameters?.order_id;
+    const duplicate = executions.find((e) => {
+      if (e.state !== 'SUCCEEDED') return false;
+      const prevOrder = e.parameters?.entity_id || e.parameters?.order_id;
+      if (explicitOrder) {
+        return (
+          prevOrder === explicitOrder ||
+          e.target === explicitOrder ||
+          e.target_resource === explicitOrder ||
+          e.command.includes(String(explicitOrder))
+        );
+      }
+      if (!isGatewayDomain) {
+        return (
+          prevOrder === effectiveEntity ||
+          e.target === effectiveEntity ||
+          e.target === target ||
+          e.target_resource === target ||
+          e.command.includes(target)
+        );
+      }
+      return false;
+    });
 
     if (duplicate) {
       return {
         passed: false,
         violated_invariant: 'INV_NEVER_CHARGE_TWICE',
-        reason: `Action BLOCKED: Order/Entity "${effectiveEntity}" has already been settled in execution ${duplicate.execution_id}. Invariant INV_NEVER_CHARGE_TWICE strictly enforced.`,
+        reason: `Action BLOCKED: Order/Entity "${explicitOrder || target || effectiveEntity}" has already been settled in execution ${duplicate.execution_id}. Invariant INV_NEVER_CHARGE_TWICE strictly enforced.`,
         risk_score: 1.0,
       };
     }
@@ -176,14 +202,15 @@ export function evaluateBusinessInvariants(params: {
 
     // Check Spending Limits
     const rawAmount = parameters?.amount || parameters?.cost || parameters?.price;
+    const maxPerAction = mandate.spending_limits.max_per_action ?? (mandate.spending_limits as any).single_action_limit ?? 500;
     if (rawAmount !== undefined && rawAmount !== null) {
       const amount = Number(rawAmount);
       if (!isNaN(amount) && amount > 0) {
-        if (amount > mandate.spending_limits.max_per_action) {
+        if (amount > maxPerAction) {
           return {
             passed: false,
             violated_invariant: 'INV_NEVER_EXCEED_LIMIT',
-            reason: `Action BLOCKED: Requested amount ${amount} ${mandate.spending_limits.currency} exceeds single-action ceiling of ${mandate.spending_limits.max_per_action} ${mandate.spending_limits.currency}.`,
+            reason: `Action BLOCKED: Requested amount ${amount} ${mandate.spending_limits.currency} exceeds single-action ceiling of ${maxPerAction} ${mandate.spending_limits.currency}.`,
             risk_score: 0.95,
           };
         }

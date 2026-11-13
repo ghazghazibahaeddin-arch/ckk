@@ -59,7 +59,18 @@ import {
   FileCheck2,
 } from 'lucide-react';
 import { PWAInstallButton } from './components/PWAInstallButton';
-import { signInWithGoogle, signOutUser, subscribeToAuth } from './firebase';
+import {
+  signInWithGoogle,
+  signOutUser,
+  subscribeToAuth,
+  syncUserProfile,
+  saveUserProject,
+  saveUserAgent,
+  deleteUserAgentDoc,
+  saveDecisionReceipt,
+  loadUserWorkspaceFromFirestore,
+  testFirestoreConnection,
+} from './firebase';
 import { ContractsView } from './components/assurance/ContractsView';
 import { ConflictsView } from './components/assurance/ConflictsView';
 import { MandatesView } from './components/assurance/MandatesView';
@@ -70,6 +81,7 @@ import { DelegationsView } from './components/governance/DelegationsView';
 import { BudgetGuardView } from './components/governance/BudgetGuardView';
 import { McpGovernanceView } from './components/governance/McpGovernanceView';
 import { CapabilityEvidenceView } from './components/governance/CapabilityEvidenceView';
+import { AgentPlaygroundModal } from './components/AgentPlaygroundModal';
 import type {
   ActionContractRecord,
   ContractExecutionRecord,
@@ -353,19 +365,31 @@ export default function App() {
   const [notice, setNotice] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   // Authenticated User Session
-  const [currentUser, setCurrentUser] = useState({
-    userId: 'usr-admin-01',
-    username: 'admin',
-    displayName: 'Lead Security Architect',
-    role: 'admin',
-    tenantId: 'tenant-corp-acme',
+  const [authReady, setAuthReady] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<{
+    userId: string;
+    username: string;
+    displayName: string;
+    role: string;
+    tenantId: string;
+    authProvider?: 'google' | 'password' | 'sandbox';
+  }>({
+    userId: '',
+    username: '',
+    displayName: '',
+    role: 'supervisor',
+    tenantId: '',
+    authProvider: 'password',
   });
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [authForm, setAuthForm] = useState({
-    username: 'admin',
-    password: 'admin123456',
-    displayName: 'Security Engineer',
+    username: '',
+    password: '',
+    displayName: '',
   });
 
   // Projects State
@@ -389,6 +413,8 @@ export default function App() {
   });
   const [testingAgentId, setTestingAgentId] = useState<string | null>(null);
   const [togglingAgentId, setTogglingAgentId] = useState<string | null>(null);
+  const [playgroundAgent, setPlaygroundAgent] = useState<AgentItem | null>(null);
+  const [showPlaygroundModal, setShowPlaygroundModal] = useState<boolean>(false);
 
   // 4-Step Connect Agent Onboarding Workflow State
   const [onboardingStep, setOnboardingStep] = useState<1 | 2 | 3 | 4>(1);
@@ -531,11 +557,25 @@ export default function App() {
   };
 
   // -----------------------------------------------------------
-  // Data Fetching Operations
+  // Authenticated Tenant Fetch Helper
   // -----------------------------------------------------------
+  const authFetch = useCallback(
+    (url: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      if (!headers.has('Content-Type') && (!init?.method || init.method !== 'GET')) {
+        headers.set('Content-Type', 'application/json');
+      }
+      headers.set('x-tenant-id', currentUser.tenantId);
+      headers.set('x-user-id', currentUser.userId);
+      headers.set('x-user-role', currentUser.role);
+      return fetch(url, { ...init, headers });
+    },
+    [currentUser]
+  );
+
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/system/status');
+      const res = await authFetch('/api/v1/system/status');
       if (res.ok) {
         const data = await res.json();
         setSystemStatus(data);
@@ -546,27 +586,45 @@ export default function App() {
     } catch {
       setIsBackendLive(false);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchProjects = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/projects');
+      const res = await authFetch('/api/v1/projects');
       if (res.ok) {
         const data = await res.json();
+        if (data.length === 0) {
+          // Auto-bootstrap primary production project for this user's tenant
+          const createRes = await authFetch('/api/v1/projects', {
+            method: 'POST',
+            body: JSON.stringify({
+              name: 'Primary Agent Control Project',
+              description: 'Default production environment for Decision Integrity Infrastructure',
+              tenant_id: currentUser.tenantId,
+            }),
+          });
+          if (createRes.ok) {
+            const newProj = await createRes.json();
+            setProjects([newProj]);
+            setActiveProjectId(newProj.project_id);
+            saveUserProject(newProj.project_id, newProj).catch(() => {});
+            return;
+          }
+        }
         setProjects(data);
-        if (data.length > 0 && !activeProjectId) {
+        if (data.length > 0 && (!activeProjectId || !data.some((p: any) => p.project_id === activeProjectId))) {
           setActiveProjectId(data[0].project_id);
         }
       }
     } catch (err) {
       console.warn('Failed to fetch projects', err);
     }
-  }, [activeProjectId]);
+  }, [activeProjectId, authFetch, currentUser.tenantId]);
 
   const fetchApiKeys = useCallback(async (projId: string) => {
     if (!projId) return;
     try {
-      const res = await fetch(`/api/v1/projects/${projId}/keys`);
+      const res = await authFetch(`/api/v1/projects/${projId}/keys`);
       if (res.ok) {
         const data = await res.json();
         setApiKeys(data);
@@ -574,11 +632,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch api keys', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchFacts = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/facts');
+      const res = await authFetch('/api/v1/facts');
       if (res.ok) {
         const data = await res.json();
         setFacts(data);
@@ -586,11 +644,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch facts', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchEvidence = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/evidence');
+      const res = await authFetch('/api/v1/evidence');
       if (res.ok) {
         const data = await res.json();
         setEvidenceList(data);
@@ -598,12 +656,12 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch evidence', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchDependencies = useCallback(async (projId?: string) => {
     try {
       const url = projId ? `/api/v1/dependencies?project_id=${projId}` : '/api/v1/dependencies';
-      const res = await fetch(url);
+      const res = await authFetch(url);
       if (res.ok) {
         const data = await res.json();
         setDependencies(data);
@@ -611,11 +669,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch dependencies', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchApprovals = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/approvals');
+      const res = await authFetch('/api/v1/approvals');
       if (res.ok) {
         const data = await res.json();
         setApprovals(data);
@@ -623,11 +681,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch approvals', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchPolicies = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/policies');
+      const res = await authFetch('/api/v1/policies');
       if (res.ok) {
         const data = await res.json();
         setPolicies(data);
@@ -635,11 +693,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch policies', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchAudits = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/audits?limit=50');
+      const res = await authFetch('/api/v1/audits?limit=50');
       if (res.ok) {
         const data = await res.json();
         setAudits(data);
@@ -647,11 +705,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch audits', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchConnectors = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/connectors');
+      const res = await authFetch('/api/v1/connectors');
       if (res.ok) {
         const data = await res.json();
         setConnectors(data);
@@ -659,11 +717,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch connectors', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchScenarios = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/scenarios');
+      const res = await authFetch('/api/v1/scenarios');
       if (res.ok) {
         const data = await res.json();
         setScenarios(data);
@@ -671,11 +729,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch scenarios', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchMcpConfig = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/mcp/config');
+      const res = await authFetch('/api/v1/mcp/config');
       if (res.ok) {
         const data = await res.json();
         setMcpConfig(data);
@@ -683,11 +741,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch mcp config', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchReceipts = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/receipts?redact=false');
+      const res = await authFetch('/api/v1/receipts?redact=false');
       if (res.ok) {
         const data = await res.json();
         setReceipts(data);
@@ -695,11 +753,11 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch receipts', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchAgents = useCallback(async () => {
     try {
-      const res = await fetch('/api/v1/agents');
+      const res = await authFetch('/api/v1/agents');
       if (res.ok) {
         const data = await res.json();
         setAgents(data);
@@ -707,7 +765,7 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch agents', err);
     }
-  }, []);
+  }, [authFetch]);
 
   const fetchAssuranceData = useCallback(async () => {
     try {
@@ -729,22 +787,22 @@ export default function App() {
         mcpServersRes,
         capabilityRes,
       ] = await Promise.all([
-        fetch('/api/v1/contracts').catch(() => null),
-        fetch('/api/v1/contracts/executions').catch(() => null),
-        fetch('/api/v1/facts/history').catch(() => null),
-        fetch('/api/v1/conflicts').catch(() => null),
-        fetch('/api/v1/revalidations').catch(() => null),
-        fetch('/api/v1/mandates').catch(() => null),
-        fetch('/api/v1/invariants').catch(() => null),
-        fetch('/api/v1/skills').catch(() => null),
-        fetch('/api/v1/skills/impact-receipts').catch(() => null),
-        fetch('/api/v1/incidents').catch(() => null),
-        fetch('/api/v1/incidents/corrections').catch(() => null),
-        fetch('/api/v1/incidents/replay-packs').catch(() => null),
-        fetch('/api/v1/delegations').catch(() => null),
-        fetch('/api/v1/budgets').catch(() => null),
-        fetch('/api/v1/mcp/servers').catch(() => null),
-        fetch('/api/v1/capability-evidence').catch(() => null),
+        authFetch('/api/v1/contracts').catch(() => null),
+        authFetch('/api/v1/contracts/executions').catch(() => null),
+        authFetch('/api/v1/facts/history').catch(() => null),
+        authFetch('/api/v1/conflicts').catch(() => null),
+        authFetch('/api/v1/revalidations').catch(() => null),
+        authFetch('/api/v1/mandates').catch(() => null),
+        authFetch('/api/v1/invariants').catch(() => null),
+        authFetch('/api/v1/skills').catch(() => null),
+        authFetch('/api/v1/skills/impact-receipts').catch(() => null),
+        authFetch('/api/v1/incidents').catch(() => null),
+        authFetch('/api/v1/incidents/corrections').catch(() => null),
+        authFetch('/api/v1/incidents/replay-packs').catch(() => null),
+        authFetch('/api/v1/delegations').catch(() => null),
+        authFetch('/api/v1/budgets').catch(() => null),
+        authFetch('/api/v1/mcp/servers').catch(() => null),
+        authFetch('/api/v1/capability-evidence').catch(() => null),
       ]);
 
       if (contractsRes?.ok) setContracts(await contractsRes.json());
@@ -766,6 +824,126 @@ export default function App() {
     } catch (err) {
       console.warn('Failed to fetch assurance data', err);
     }
+  }, [authFetch]);
+
+  // -----------------------------------------------------------
+  // Firebase & Local Real User Auth Session Initialization
+  // -----------------------------------------------------------
+  useEffect(() => {
+    let active = true;
+
+    const bootstrapSession = async (
+      userPayload: {
+        userId: string;
+        username: string;
+        displayName: string;
+        role: string;
+        tenantId: string;
+        authProvider: 'google' | 'password' | 'sandbox';
+      },
+      workspaceDocs?: { projects: Record<string, unknown>[]; agents: Record<string, unknown>[] }
+    ) => {
+      try {
+        await fetch('/api/v1/auth/firebase-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uid: userPayload.userId,
+            email: userPayload.username,
+            displayName: userPayload.displayName,
+            role: userPayload.role,
+          }),
+        });
+        await fetch('/api/v1/workspace/sync', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-tenant-id': userPayload.tenantId,
+          },
+          body: JSON.stringify({
+            tenant_id: userPayload.tenantId,
+            projects: workspaceDocs?.projects || [],
+            agents: workspaceDocs?.agents || [],
+          }),
+        });
+      } catch (err) {
+        console.warn('Workspace sync fallback:', err);
+      }
+    };
+
+    const unsubscribe = subscribeToAuth(async (fbUser) => {
+      if (!active) return;
+      if (fbUser) {
+        const tenantId = `tenant_${fbUser.uid}`;
+        let resolvedRole = 'supervisor';
+        let workspaceDocs: { projects: Record<string, unknown>[]; agents: Record<string, unknown>[] } = {
+          projects: [],
+          agents: [],
+        };
+        try {
+          const profile = await syncUserProfile(fbUser);
+          if ((profile as any)?.role) {
+            resolvedRole = String((profile as any).role);
+          }
+          const loaded = await loadUserWorkspaceFromFirestore(fbUser.uid);
+          workspaceDocs = { projects: loaded.projects, agents: loaded.agents };
+        } catch (err) {
+          console.warn('Firestore profile/workspace load fallback:', err);
+        }
+
+        const nextUser = {
+          userId: fbUser.uid,
+          username: fbUser.email || fbUser.uid,
+          displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'CCK Engineer',
+          role: resolvedRole,
+          tenantId,
+          authProvider: 'google' as const,
+        };
+        await bootstrapSession(nextUser, workspaceDocs);
+        if (!active) return;
+        localStorage.setItem('cck_user_session', JSON.stringify(nextUser));
+        setCurrentUser(nextUser);
+        setIsAuthenticated(true);
+        setAuthReady(true);
+        return;
+      }
+
+      // Check stored password / sandbox session when Firebase user is absent
+      try {
+        const savedRaw = localStorage.getItem('cck_user_session');
+        if (savedRaw) {
+          const parsed = JSON.parse(savedRaw);
+          if (parsed?.userId && parsed?.tenantId && parsed.authProvider !== 'google') {
+            const restoredUser = {
+              userId: String(parsed.userId),
+              username: String(parsed.username || parsed.userId),
+              displayName: String(parsed.displayName || parsed.username || 'CCK Engineer'),
+              role: String(parsed.role || 'supervisor'),
+              tenantId: String(parsed.tenantId),
+              authProvider: (parsed.authProvider === 'sandbox' ? 'sandbox' : 'password') as 'sandbox' | 'password',
+            };
+            await bootstrapSession(restoredUser);
+            if (!active) return;
+            setCurrentUser(restoredUser);
+            setIsAuthenticated(true);
+            setAuthReady(true);
+            return;
+          }
+        }
+      } catch {
+        localStorage.removeItem('cck_user_session');
+      }
+
+      if (active) {
+        setIsAuthenticated(false);
+        setAuthReady(true);
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, []);
 
   // Online / Offline Fail-Closed Network Monitor
@@ -786,8 +964,10 @@ export default function App() {
     };
   }, []);
 
-  // Initial Boot
+  // Initial Boot (Only runs once user has authenticated into their tenant workspace)
   useEffect(() => {
+    if (!isAuthenticated || !currentUser.tenantId) return;
+
     fetchStatus();
     fetchProjects();
     fetchAgents();
@@ -811,6 +991,8 @@ export default function App() {
     }, 12000);
     return () => clearInterval(interval);
   }, [
+    isAuthenticated,
+    currentUser.tenantId,
     fetchStatus,
     fetchProjects,
     fetchAgents,
@@ -829,11 +1011,12 @@ export default function App() {
 
   // Project keys refresh on project switch
   useEffect(() => {
+    if (!isAuthenticated || !currentUser.tenantId) return;
     if (activeProjectId) {
       fetchApiKeys(activeProjectId);
       fetchDependencies(activeProjectId);
     }
-  }, [activeProjectId, fetchApiKeys, fetchDependencies]);
+  }, [isAuthenticated, currentUser.tenantId, activeProjectId, fetchApiKeys, fetchDependencies]);
 
   // -----------------------------------------------------------
   // Action Gate Live Evaluation
@@ -848,12 +1031,12 @@ export default function App() {
         parameters: { command: gateCommand, project_id: activeProjectId },
         severity: gateSeverity,
         agent: 'agt-dashboard-user',
+        tenant_id: currentUser.tenantId,
         shadow_mode: shadowMode,
       };
 
-      const res = await fetch('/api/v1/actions/evaluate', {
+      const res = await authFetch('/api/v1/actions/evaluate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
@@ -870,10 +1053,21 @@ export default function App() {
           actionId: data.action_id,
         });
 
+        if (data.receipt_id) {
+          saveDecisionReceipt(data.receipt_id, {
+            ...(data.receipt || data),
+            receipt_id: data.receipt_id,
+            agent_id: 'agt-dashboard-user',
+            project_id: activeProjectId,
+            tenant_id: currentUser.tenantId,
+          }).catch(() => {});
+        }
+
         if (data.decision === 'REQUIRE_APPROVAL') {
           fetchApprovals();
         }
         fetchAudits();
+        fetchReceipts();
         fetchStatus();
       } else {
         const err = await res.json();
@@ -892,9 +1086,8 @@ export default function App() {
   const handleInvalidateFact = async (entityId: string, fieldName: string, newValue: string) => {
     setInvalidatingFact(true);
     try {
-      const res = await fetch('/api/v1/facts/invalidate', {
+      const res = await authFetch('/api/v1/facts/invalidate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           entity_id: entityId,
           field_name: fieldName,
@@ -928,9 +1121,8 @@ export default function App() {
     e.preventDefault();
     if (!activeProjectId) return;
     try {
-      const res = await fetch(`/api/v1/projects/${activeProjectId}/keys`, {
+      const res = await authFetch(`/api/v1/projects/${activeProjectId}/keys`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: newKeyName }),
       });
       if (res.ok) {
@@ -949,7 +1141,7 @@ export default function App() {
   // -----------------------------------------------------------
   const executeRevokeApiKey = async (keyId: string) => {
     try {
-      const res = await fetch(`/api/v1/projects/${activeProjectId}/keys/${keyId}`, {
+      const res = await authFetch(`/api/v1/projects/${activeProjectId}/keys/${keyId}`, {
         method: 'DELETE',
       });
       if (res.ok) {
@@ -973,9 +1165,8 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch('/api/v1/agents', {
+      const res = await authFetch('/api/v1/agents', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...newAgentForm,
           project_id: activeProjectId || undefined,
@@ -988,6 +1179,7 @@ export default function App() {
         const creds = created.credentials || null;
 
         setAgents((prev) => [agentObj, ...prev.filter((a) => a.agent_id !== agentObj.agent_id)]);
+        saveUserAgent(agentObj.agent_id, agentObj as unknown as Record<string, unknown>).catch(() => {});
         setRegisteredAgent(agentObj);
         setAgentCredentials(creds);
         setIntegrationFramework((newAgentForm.framework as any) || 'langgraph');
@@ -996,6 +1188,7 @@ export default function App() {
         setHeartbeatPayload(null);
         showNotification(`Agent registered with status DISCONNECTED. Secret credentials generated.`, 'info');
         fetchStatus();
+        if (activeProjectId) fetchApiKeys(activeProjectId);
       } else {
         const err = await res.json();
         showNotification(err.detail || 'Failed to register agent', 'error');
@@ -1010,11 +1203,11 @@ export default function App() {
     setVerifyingHeartbeat(true);
     setHeartbeatSuccess(null);
     try {
-      const res = await fetch(`/api/v1/agents/${registeredAgent.agent_id}/heartbeat`, {
+      const res = await authFetch(`/api/v1/agents/${registeredAgent.agent_id}/heartbeat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${agentCredentials.api_key}`,
+          Authorization: `Bearer ${agentCredentials.api_key}`,
         },
       });
       const data = await res.json();
@@ -1028,6 +1221,7 @@ export default function App() {
         };
         setRegisteredAgent(updatedAgent);
         setAgents((prev) => prev.map((a) => (a.agent_id === updatedAgent.agent_id ? updatedAgent : a)));
+        saveUserAgent(updatedAgent.agent_id, updatedAgent as unknown as Record<string, unknown>).catch(() => {});
         showNotification(`Agent connection verified! Status is now CONNECTED.`, 'success');
         fetchStatus();
       } else {
@@ -1043,36 +1237,136 @@ export default function App() {
   };
 
   const handleGoogleSignIn = async () => {
+    setAuthLoading(true);
+    setAuthError(null);
     try {
       const user = await signInWithGoogle();
       if (user) {
-        setCurrentUser({
+        const tenantId = `tenant_${user.uid}`;
+        let resolvedRole = 'supervisor';
+        let workspaceDocs: { projects: Record<string, unknown>[]; agents: Record<string, unknown>[] } = {
+          projects: [],
+          agents: [],
+        };
+        try {
+          const profile = await syncUserProfile(user);
+          if ((profile as any)?.role) resolvedRole = String((profile as any).role);
+          const loaded = await loadUserWorkspaceFromFirestore(user.uid);
+          workspaceDocs = { projects: loaded.projects, agents: loaded.agents };
+        } catch {
+          // Non-fatal fallback
+        }
+
+        await fetch('/api/v1/auth/firebase-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uid: user.uid,
+            email: user.email || user.uid,
+            displayName: user.displayName || user.email || 'CCK Engineer',
+            role: resolvedRole,
+          }),
+        }).catch(() => {});
+        await fetch('/api/v1/workspace/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+          body: JSON.stringify({
+            tenant_id: tenantId,
+            projects: workspaceDocs.projects,
+            agents: workspaceDocs.agents,
+          }),
+        }).catch(() => {});
+
+        const nextUser = {
           userId: user.uid,
-          username: user.email?.split('@')[0] || 'developer',
+          username: user.email || user.uid,
           displayName: user.displayName || user.email || 'CCK Engineer',
-          role: 'admin',
-          tenantId: `tenant-${user.uid.slice(0, 8)}`,
-        });
+          role: resolvedRole,
+          tenantId,
+          authProvider: 'google' as const,
+        };
+        localStorage.setItem('cck_user_session', JSON.stringify(nextUser));
+        setCurrentUser(nextUser);
+        setIsAuthenticated(true);
         setShowAuthModal(false);
-        showNotification(`Signed in with Google as ${user.displayName || user.email}`, 'success');
+        showNotification(`تم تسجيل الدخول بنجاح باسم ${nextUser.displayName}`, 'success');
       }
-    } catch {
-      showNotification('Google Sign-In was cancelled or encountered an error', 'error');
+    } catch (err: any) {
+      const msg = err?.message || 'Google Sign-In was cancelled or encountered an error';
+      setAuthError(msg);
+      showNotification(msg, 'error');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleEnterSandbox = async () => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      let sandboxUid = localStorage.getItem('cck_sandbox_uid') || '';
+      if (!sandboxUid) {
+        sandboxUid = `sandbox_${crypto.randomUUID().slice(0, 10)}`;
+        localStorage.setItem('cck_sandbox_uid', sandboxUid);
+      }
+      const res = await fetch('/api/v1/auth/firebase-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: sandboxUid,
+          email: `${sandboxUid}@sandbox.cck.local`,
+          displayName: 'Sandbox Explorer',
+          role: 'supervisor',
+        }),
+      });
+      if (!res.ok) {
+        throw new Error('تعذر تهيئة بيئة التجربة المعزولة');
+      }
+      const data = await res.json();
+      const nextUser = {
+        userId: data.user?.user_id || sandboxUid,
+        username: data.user?.username || `${sandboxUid}@sandbox.cck.local`,
+        displayName: 'Sandbox Explorer',
+        role: data.user?.role || 'supervisor',
+        tenantId: data.user?.tenant_id || `tenant_${sandboxUid}`,
+        authProvider: 'sandbox' as const,
+      };
+      localStorage.setItem('cck_user_session', JSON.stringify(nextUser));
+      setCurrentUser(nextUser);
+      setIsAuthenticated(true);
+      setShowAuthModal(false);
+      showNotification('تم فتح بيئة تجربة معزولة خاصة بك بنجاح.', 'success');
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to enter isolated sandbox';
+      setAuthError(msg);
+      showNotification(msg, 'error');
+    } finally {
+      setAuthLoading(false);
     }
   };
 
   const handleSignOutUser = async () => {
     try {
-      await signOutUser();
+      await signOutUser().catch(() => {});
+      localStorage.removeItem('cck_user_session');
       setCurrentUser({
-        userId: 'anonymous',
-        username: 'Guest',
-        displayName: 'Guest User',
-        role: 'viewer',
-        tenantId: 'tenant-guest',
+        userId: '',
+        username: '',
+        displayName: '',
+        role: 'supervisor',
+        tenantId: '',
+        authProvider: 'password',
       });
+      setProjects([]);
+      setActiveProjectId('');
+      setAgents([]);
+      setReceipts([]);
+      setAudits([]);
+      setApiKeys([]);
+      setApprovals([]);
+      setIsAuthenticated(false);
       setShowAuthModal(false);
-      showNotification('Signed out successfully', 'info');
+      showNotification('تم تسجيل الخروج بأمان', 'info');
     } catch {
       showNotification('Error signing out', 'error');
     }
@@ -1081,9 +1375,8 @@ export default function App() {
   const handleTestAgentGate = async (agent: AgentItem) => {
     setTestingAgentId(agent.agent_id);
     try {
-      const res = await fetch(`/api/v1/agents/${agent.agent_id}/test-gate`, {
+      const res = await authFetch(`/api/v1/agents/${agent.agent_id}/test-gate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           target: agent.target_resource,
           action_command: `${agent.target_capability} on ${agent.target_resource}`,
@@ -1095,6 +1388,16 @@ export default function App() {
           `Action evaluated for ${agent.name}: Verdict = ${result.verdict} (${result.reason})`,
           result.verdict === 'ALLOW' ? 'success' : 'error'
         );
+        if (result.receipt_id) {
+          saveDecisionReceipt(result.receipt_id, {
+            receipt_id: result.receipt_id,
+            agent_id: agent.agent_id,
+            project_id: agent.project_id || activeProjectId,
+            tenant_id: currentUser.tenantId,
+            status: result.verdict,
+            verdict: { decision: result.verdict, reasoning: result.reason },
+          }).catch(() => {});
+        }
         fetchAgents();
         fetchAudits();
         fetchReceipts();
@@ -1112,9 +1415,8 @@ export default function App() {
   const handleToggleAgentDrift = async (agent: AgentItem) => {
     setTogglingAgentId(agent.agent_id);
     try {
-      const res = await fetch(`/api/v1/agents/${agent.agent_id}/drift-toggle`, {
+      const res = await authFetch(`/api/v1/agents/${agent.agent_id}/drift-toggle`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
       });
       if (res.ok) {
         const result = await res.json();
@@ -1135,9 +1437,10 @@ export default function App() {
 
   const executeDeleteAgent = async (agentId: string) => {
     try {
-      const res = await fetch(`/api/v1/agents/${agentId}`, { method: 'DELETE' });
+      const res = await authFetch(`/api/v1/agents/${agentId}`, { method: 'DELETE' });
       if (res.ok) {
         setAgents((prev) => prev.filter((a) => a.agent_id !== agentId));
+        deleteUserAgentDoc(agentId).catch(() => {});
         showNotification('Agent permanently deleted and resources purged.', 'info');
         fetchStatus();
       } else {
@@ -1152,7 +1455,7 @@ export default function App() {
 
   const handleDisconnectAgent = async (agentId: string) => {
     try {
-      const res = await fetch(`/api/v1/agents/${agentId}/disconnect`, { method: 'POST' });
+      const res = await authFetch(`/api/v1/agents/${agentId}/disconnect`, { method: 'POST' });
       if (res.ok) {
         showNotification('Agent disconnected and API key deauthorized.', 'info');
         fetchAgents();
@@ -1165,9 +1468,26 @@ export default function App() {
     }
   };
 
-  const handleExportAgentData = (agentId: string) => {
-    window.location.href = `/api/v1/agents/${agentId}/export`;
-    showNotification('Exporting agent receipts and audit ledger...', 'success');
+  const handleExportAgentData = async (agentId: string) => {
+    try {
+      const res = await authFetch(`/api/v1/agents/${agentId}/export`);
+      if (!res.ok) {
+        showNotification('Failed to export agent ledger.', 'error');
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `cck-agent-${agentId}-export.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showNotification('Exported agent receipts and audit ledger.', 'success');
+    } catch {
+      showNotification('Failed to export agent ledger.', 'error');
+    }
   };
 
   // -----------------------------------------------------------
@@ -1177,9 +1497,8 @@ export default function App() {
     e.preventDefault();
     if (!newProjectName.trim()) return;
     try {
-      const res = await fetch('/api/v1/projects', {
+      const res = await authFetch('/api/v1/projects', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: newProjectName,
           description: newProjectDesc,
@@ -1193,6 +1512,7 @@ export default function App() {
         const created = await res.json();
         setProjects((prev) => [created, ...prev]);
         setActiveProjectId(created.project_id);
+        saveUserProject(created.project_id, created).catch(() => {});
         setShowNewProjectModal(false);
         setNewProjectName('');
         setNewProjectDesc('');
@@ -1210,9 +1530,8 @@ export default function App() {
   const handleCreateFact = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/v1/facts', {
+      const res = await authFetch('/api/v1/facts', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           entity_id: newFactEntity,
           field_name: newFactField,
@@ -1235,9 +1554,8 @@ export default function App() {
   const handleCreateDependency = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/v1/dependencies', {
+      const res = await authFetch('/api/v1/dependencies', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_id: activeProjectId,
           action_capability: newDepCap,
@@ -1262,7 +1580,7 @@ export default function App() {
   const handleRunAllScenarios = async () => {
     setRunningScenarios(true);
     try {
-      const res = await fetch('/api/v1/scenarios/run', { method: 'POST' });
+      const res = await authFetch('/api/v1/scenarios/run', { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         setScenarioReport(data);
@@ -1285,7 +1603,7 @@ export default function App() {
   const handleVerifyChain = async () => {
     setVerifyingChain(true);
     try {
-      const res = await fetch('/api/v1/audits/verify-chain');
+      const res = await authFetch('/api/v1/audits/verify-chain');
       if (res.ok) {
         const data = await res.json();
         setChainVerify(data);
@@ -1302,9 +1620,8 @@ export default function App() {
   // -----------------------------------------------------------
   const handleResolveApproval = async (approvalId: string, approved: boolean) => {
     try {
-      const res = await fetch(`/api/v1/approvals/${approvalId}/resolve`, {
+      const res = await authFetch(`/api/v1/approvals/${approvalId}/resolve`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           approved,
           reviewer: currentUser.username,
@@ -1331,6 +1648,8 @@ export default function App() {
   // -----------------------------------------------------------
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setAuthLoading(true);
+    setAuthError(null);
     const endpoint = authMode === 'login' ? '/api/v1/auth/login' : '/api/v1/auth/register';
     try {
       const res = await fetch(endpoint, {
@@ -1338,32 +1657,41 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(authForm),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setCurrentUser({
+      const data = await res.json();
+      if (res.ok && data.user) {
+        const nextUser = {
           userId: data.user.user_id,
           username: data.user.username,
           displayName: data.user.display_name,
           role: data.user.role,
           tenantId: data.user.tenant_id,
-        });
+          authProvider: 'password' as const,
+        };
+        localStorage.setItem('cck_user_session', JSON.stringify(nextUser));
+        setCurrentUser(nextUser);
+        setIsAuthenticated(true);
         setShowAuthModal(false);
-        showNotification(`Welcome, ${data.user.display_name}!`, 'success');
+        setAuthForm({ username: '', password: '', displayName: '' });
+        showNotification(`أهلاً بك ${nextUser.displayName}!`, 'success');
       } else {
-        const err = await res.json();
-        showNotification(err.detail || 'Authentication failed', 'error');
+        const msg = data.detail || data.error || 'Authentication failed';
+        setAuthError(msg);
+        showNotification(msg, 'error');
       }
     } catch {
-      showNotification('Authentication error', 'error');
+      const msg = 'تعذر الاتصال بخادم المصادقة';
+      setAuthError(msg);
+      showNotification(msg, 'error');
+    } finally {
+      setAuthLoading(false);
     }
   };
 
   const handleSendTestWebhook = async () => {
     setWebhookSending(true);
     try {
-      const res = await fetch('/api/v1/webhooks/ingest', {
+      const res = await authFetch('/api/v1/webhooks/ingest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           entity_id: webhookEntity,
           field_name: webhookField,
@@ -1397,9 +1725,8 @@ export default function App() {
   const handleRunFailureLab = async (scenarioId: string = failureLabScenario) => {
     setFailureLabRunning(true);
     try {
-      const res = await fetch('/api/v1/failure-lab/run', {
+      const res = await authFetch('/api/v1/failure-lab/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scenario_id: scenarioId }),
       });
       if (res.ok) {
@@ -1427,9 +1754,8 @@ export default function App() {
   const handleRunBenchmark = async () => {
     setBenchmarkRunning(true);
     try {
-      const res = await fetch('/api/v1/benchmark/run', {
+      const res = await authFetch('/api/v1/benchmark/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
       });
       if (res.ok) {
         const data = await res.json();
@@ -1482,11 +1808,278 @@ export default function App() {
     { id: 'diagnostics' as NavSection, label: 'Diagnostics & System Health', icon: Cpu },
   ];
 
+  const liveOrigin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : 'http://localhost:3000';
+
+  if (!authReady) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center ${bgMain}`}>
+        <div className="flex flex-col items-center space-y-3 text-xs font-mono text-slate-400">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 via-indigo-600 to-emerald-500 flex items-center justify-center animate-pulse">
+            <ShieldCheck className="w-5 h-5 text-white" />
+          </div>
+          <span>جاري تجهيز بيئة العمل الآمنة...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div
+        dir="ltr"
+        className={`min-h-screen flex flex-col justify-center items-center p-4 sm:p-6 font-sans ${bgMain}`}
+      >
+        <div className="w-full max-w-4xl grid grid-cols-1 lg:grid-cols-5 rounded-3xl border border-slate-800 bg-slate-900/90 shadow-2xl overflow-hidden">
+          {/* Left Product Value Panel */}
+          <div className="lg:col-span-2 p-7 bg-gradient-to-br from-slate-950 via-cyan-950/40 to-indigo-950/50 border-b lg:border-b-0 lg:border-r border-slate-800 flex flex-col justify-between space-y-6">
+            <div className="space-y-4">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 via-indigo-600 to-emerald-500 flex items-center justify-center shadow-lg shadow-cyan-500/20">
+                  <ShieldCheck className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h1 className="font-bold text-lg font-mono text-white tracking-tight">CCK Platform</h1>
+                  <p className="text-[11px] text-cyan-300 font-mono">Decision Integrity Infrastructure</p>
+                </div>
+              </div>
+
+              <div className="space-y-2 pt-2">
+                <h2 className="text-xl font-bold text-white leading-snug">
+                  حماية شاملة لقرارات وأفعال وكلاء الذكاء الاصطناعي
+                </h2>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  سجّل الدخول للحصول على مساحة عمل خاصة ومعزولة تحفظ مشاريعك ووكلاءك ومفاتيح الربط وسندات القرار المشفرة في Firestore.
+                </p>
+              </div>
+
+              <div className="space-y-2.5 text-xs text-slate-300 pt-2">
+                <div className="flex items-center space-x-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Action Gate + Zero-Bypass Policy Enforcement</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Multi-Hop Delegation &amp; Runtime Budget Guard</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Python / TypeScript / MCP JSON-RPC Integration</span>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>Encrypted SHA-256 Decision Receipts</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="text-[11px] font-mono text-slate-400 pt-4 border-t border-slate-800/80">
+              Tenant Isolation • Scrypt + TimingSafe • Firestore Persistent
+            </div>
+          </div>
+
+          {/* Right Auth Form Panel */}
+          <div className="lg:col-span-3 p-7 space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-white">
+                  {authMode === 'login' ? 'تسجيل الدخول إلى حسابك' : 'إنشاء حساب جديد'}
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  {authMode === 'login'
+                    ? 'Sign in to access your agents, projects, and Action Gate.'
+                    : 'Create an isolated tenant workspace for your AI agents.'}
+                </p>
+              </div>
+              <div className="flex rounded-xl bg-slate-950 p-1 border border-slate-800 text-xs">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('login');
+                    setAuthError(null);
+                  }}
+                  className={`px-3 py-1 rounded-lg font-semibold transition-colors ${
+                    authMode === 'login' ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  دخول
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuthMode('register');
+                    setAuthError(null);
+                  }}
+                  className={`px-3 py-1 rounded-lg font-semibold transition-colors ${
+                    authMode === 'register' ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  حساب جديد
+                </button>
+              </div>
+            </div>
+
+            {authError && (
+              <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-200 text-xs flex items-center space-x-2">
+                <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            {/* Google Sign-In */}
+            <button
+              type="button"
+              disabled={authLoading}
+              onClick={handleGoogleSignIn}
+              className="w-full py-2.5 px-4 rounded-xl border border-slate-700 bg-slate-950 hover:bg-slate-800 text-slate-100 font-semibold text-xs flex items-center justify-center space-x-2.5 shadow-sm transition-colors disabled:opacity-50"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24">
+                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+              </svg>
+              <span>المتابعة بحساب Google (مزامنة فورية مع Firestore)</span>
+            </button>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-800" />
+              </div>
+              <div className="relative flex justify-center text-[10px] uppercase font-mono">
+                <span className="bg-slate-900 px-2.5 text-slate-500">Or email &amp; password</span>
+              </div>
+            </div>
+
+            <form onSubmit={handleAuthSubmit} className="space-y-3 text-xs">
+              {authMode === 'register' && (
+                <div>
+                  <label className="block font-medium mb-1 text-slate-300">الاسم الكامل | Display Name</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Sara Al-Mansoor"
+                    value={authForm.displayName}
+                    onChange={(e) => setAuthForm({ ...authForm, displayName: e.target.value })}
+                    className="w-full px-3 py-2.5 rounded-xl border bg-slate-950 border-slate-700 text-slate-100 focus:outline-hidden focus:border-cyan-500"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block font-medium mb-1 text-slate-300">اسم المستخدم أو البريد الإلكتروني | Email or Username</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="name@company.com"
+                  value={authForm.username}
+                  onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
+                  className="w-full px-3 py-2.5 rounded-xl border bg-slate-950 border-slate-700 text-slate-100 font-mono focus:outline-hidden focus:border-cyan-500"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium mb-1 text-slate-300">كلمة المرور | Password (min 6 chars)</label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  placeholder="••••••••"
+                  value={authForm.password}
+                  onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+                  className="w-full px-3 py-2.5 rounded-xl border bg-slate-950 border-slate-700 text-slate-100 font-mono focus:outline-hidden focus:border-cyan-500"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={authLoading}
+                className="w-full py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs shadow-md shadow-cyan-500/20 transition-all disabled:opacity-50"
+              >
+                {authLoading
+                  ? 'جاري التحقق...'
+                  : authMode === 'login'
+                  ? 'تسجيل الدخول وفتح لوحة التحكم'
+                  : 'إنشاء مساحة العمل الخاصة بي'}
+              </button>
+            </form>
+
+            <div className="pt-3 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs">
+              <span className="text-slate-400 text-[11px]">تريد استكشاف المنصة فوراً دون إنشاء حساب؟</span>
+              <button
+                type="button"
+                disabled={authLoading}
+                onClick={handleEnterSandbox}
+                className="px-3.5 py-2 rounded-xl border border-indigo-500/40 bg-indigo-950/40 hover:bg-indigo-900/50 text-indigo-200 font-semibold text-xs transition-colors flex items-center space-x-1.5"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                <span>تجربة سريعة في بيئة معزولة (Sandbox)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       dir="ltr"
       className={`min-h-screen flex flex-col font-sans transition-colors duration-200 selection:bg-cyan-500 selection:text-white ${bgMain}`}
     >
+      {/* ------------------------------------------------------- */}
+      {/* Real User Dedicated Persistence & Workspace Header Strip */}
+      {/* ------------------------------------------------------- */}
+      <div
+        className={`border-b text-xs py-2 px-4 transition-colors ${
+          currentUser.authProvider === 'google'
+            ? 'bg-emerald-950/70 border-emerald-500/30 text-emerald-200'
+            : 'bg-gradient-to-r from-cyan-950/80 via-slate-900 to-indigo-950/80 border-cyan-500/30 text-cyan-200'
+        }`}
+      >
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
+          <div className="flex items-center space-x-2">
+            <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span className="leading-snug">
+              {currentUser.authProvider === 'google' ? (
+                <>
+                  <strong className="text-white">مرحباً {currentUser.displayName}!</strong> بيئة العمل وقاعدة بيانات{' '}
+                  <strong className="text-emerald-300 font-mono">Firestore</strong> متصلة بحسابك ({currentUser.tenantId}). بياناتك ووكلائك محفوظة حصرياً لك.
+                </>
+              ) : currentUser.authProvider === 'sandbox' ? (
+                <>
+                  ⚡ <strong className="text-white">وضع التجربة المعزول (Sandbox):</strong> تعمل الآن في مساحة عمل معزولة ({currentUser.tenantId}). يمكنك ربط حساب Google في أي وقت لحفظ بياناتك بشكل دائم.
+                </>
+              ) : (
+                <>
+                  <strong className="text-white">مرحباً {currentUser.displayName}!</strong> مساحة عملك المعزولة ({currentUser.tenantId}) نشطة ومحفوظة.
+                </>
+              )}
+            </span>
+          </div>
+          <div className="flex items-center space-x-2 shrink-0">
+            {currentUser.authProvider === 'sandbox' && (
+              <button
+                onClick={handleGoogleSignIn}
+                className="px-3 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center space-x-1.5 shadow-xs transition-all"
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>ترقية لحساب دائم (Google)</span>
+              </button>
+            )}
+            <button
+              onClick={() => setShowAuthModal(true)}
+              className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 font-mono text-[11px] font-semibold flex items-center space-x-1"
+            >
+              <Database className="w-3 h-3" />
+              <span>الحساب ({currentUser.role})</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* ------------------------------------------------------- */}
       {/* Top Navbar */}
       {/* ------------------------------------------------------- */}
@@ -1973,13 +2566,48 @@ export default function App() {
                   <p className={`text-xs ${textMuted} max-w-md mx-auto mb-5 leading-relaxed`}>
                     Connect your autonomous agents (LangGraph, OpenAI Agents SDK, CrewAI, AutoGen, or custom REST agents) to intercept mutations and enforce causal continuity.
                   </p>
-                  <button
-                    onClick={() => setShowConnectAgentModal(true)}
-                    className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs inline-flex items-center space-x-1.5 shadow-sm"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>Connect Your First Agent</span>
-                  </button>
+                  <div className="flex flex-wrap items-center justify-center gap-3">
+                    <button
+                      onClick={() => setShowConnectAgentModal(true)}
+                      className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs inline-flex items-center space-x-1.5 shadow-sm"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Connect Your First Agent</span>
+                    </button>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const res = await authFetch('/api/v1/agents', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                              name: 'Production Sentinel Agent',
+                              framework: 'langgraph',
+                              target_capability: 'orders.refund',
+                              target_resource: 'order:cust_1099',
+                              guardrail_mode: 'ENFORCE_AND_BLOCK',
+                              freshness_ttl_seconds: 300,
+                              project_id: activeProjectId,
+                              tenant_id: currentUser.tenantId,
+                            }),
+                          });
+                          if (res.ok) {
+                            const created = await res.json();
+                            const agt = created.agent || created;
+                            setAgents((prev) => [agt, ...prev]);
+                            setPlaygroundAgent(agt);
+                            setShowPlaygroundModal(true);
+                            showNotification('تم إنشاء الوكيل بنجاح وحفظه في Firestore وفتح مختبر الفحص والربط!', 'success');
+                          }
+                        } catch {
+                          showNotification('Failed to create instant demo agent', 'error');
+                        }
+                      }}
+                      className="px-4 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 font-bold text-xs inline-flex items-center space-x-1.5 shadow-sm transition-colors"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                      <span>إنشاء وكيل تجريبي فوري وتجربة المختبر (1-Click Demo Agent)</span>
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2044,11 +2672,22 @@ export default function App() {
                       <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800">
                         <div className="flex items-center space-x-2">
                           <button
+                            onClick={() => {
+                              setPlaygroundAgent(agent);
+                              setShowPlaygroundModal(true);
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/40 text-xs font-bold font-mono transition-colors flex items-center space-x-1"
+                            title="Open Interactive Live Testing Playground & Code Generator"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>المختبر وأكواد الربط (Playground & SDK)</span>
+                          </button>
+                          <button
                             onClick={() => handleTestAgentGate(agent)}
                             disabled={testingAgentId === agent.agent_id}
                             className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-bold font-mono transition-colors"
                           >
-                            {testingAgentId === agent.agent_id ? 'Evaluating...' : '⚡ Test Gate'}
+                            {testingAgentId === agent.agent_id ? 'Evaluating...' : '⚡ Quick Gate'}
                           </button>
                           <button
                             onClick={() => handleToggleAgentDrift(agent)}
@@ -2516,14 +3155,14 @@ export default function App() {
                     <span>Run Benchmark Locally via CLI</span>
                   </span>
                   <button
-                    onClick={() => copyText('curl -X POST http://localhost:3000/api/v1/benchmark/run', 'bench-cli')}
+                    onClick={() => copyText(`curl -X POST ${liveOrigin}/api/v1/benchmark/run`, 'bench-cli')}
                     className="text-xs text-cyan-400 hover:text-cyan-300 font-mono"
                   >
                     {copiedId === 'bench-cli' ? 'Copied!' : 'Copy Command'}
                   </button>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-950 font-mono text-xs text-slate-300 overflow-x-auto border border-slate-800">
-                  <code>curl -s -X POST http://localhost:3000/api/v1/benchmark/run | jq</code>
+                  <code>curl -s -X POST {liveOrigin}/api/v1/benchmark/run | jq</code>
                 </div>
               </div>
             </div>
@@ -4009,6 +4648,8 @@ if (verdict.decision === 'ALLOW') {
             <DelegationsView
               delegations={delegations}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4021,6 +4662,8 @@ if (verdict.decision === 'ALLOW') {
             <BudgetGuardView
               budgets={budgets}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4033,6 +4676,8 @@ if (verdict.decision === 'ALLOW') {
             <McpGovernanceView
               servers={mcpServers}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4045,6 +4690,8 @@ if (verdict.decision === 'ALLOW') {
             <CapabilityEvidenceView
               receipts={capabilityEvidence}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4061,6 +4708,8 @@ if (verdict.decision === 'ALLOW') {
               contracts={contracts}
               executions={contractExecutions}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4075,6 +4724,8 @@ if (verdict.decision === 'ALLOW') {
               factHistory={factHistory}
               revalidations={revalidations}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4088,6 +4739,8 @@ if (verdict.decision === 'ALLOW') {
               mandates={mandates}
               invariants={invariants}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4100,6 +4753,8 @@ if (verdict.decision === 'ALLOW') {
             <SkillsRegistryView
               skills={skills}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4113,6 +4768,8 @@ if (verdict.decision === 'ALLOW') {
               receipts={skillReceipts}
               skills={skills}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4127,6 +4784,8 @@ if (verdict.decision === 'ALLOW') {
               correctionPacks={correctionPacks}
               replayPacks={replayPacks}
               onRefresh={fetchAssuranceData}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               isDark={isDark}
               bgCard={bgCard}
               bgSubtle={bgSubtle}
@@ -4477,7 +5136,7 @@ if (verdict.decision === 'ALLOW') {
                     <br />
                     export CCK_API_KEY="{agentCredentials.api_key}"
                     <br />
-                    export CCK_BASE_URL="http://localhost:3000"
+                    export CCK_BASE_URL="{liveOrigin}"
                   </div>
                 </div>
 
@@ -4535,7 +5194,7 @@ from cck_sdk import CCKClient, AgentAction, AgentIdentity, with_cck_guard
 
 # 2. Connect client with your minted secret key
 cck = CCKClient(
-    base_url=os.getenv("CCK_BASE_URL", "http://localhost:3000"),
+    base_url=os.getenv("CCK_BASE_URL", "${liveOrigin}"),
     api_key="${agentCredentials.api_key}",
 )
 
@@ -4608,7 +5267,7 @@ npm install @cck/sdk
 import { CCKClient, withCCKGuard } from '@cck/sdk';
 
 const cck = new CCKClient({
-  baseUrl: 'http://localhost:3000',
+  baseUrl: '${liveOrigin}',
   apiKey: '${agentCredentials.api_key}',
 });
 
@@ -4730,9 +5389,7 @@ await withCCKGuard(
               <div className="flex items-center space-x-2">
                 <Users className="w-5 h-5 text-cyan-400" />
                 <h3 className="font-bold text-base text-slate-100">
-                  {currentUser.userId !== 'anonymous' && currentUser.userId !== 'usr-admin-01'
-                    ? 'Customer Account Profile'
-                    : 'Developer Sign-In'}
+                  {isAuthenticated ? 'ملف الحساب وبيئة العمل | Account Profile' : 'Developer Sign-In'}
                 </h3>
               </div>
               <button onClick={() => setShowAuthModal(false)} className="text-slate-400 hover:text-white">
@@ -4741,12 +5398,12 @@ await withCCKGuard(
             </div>
 
             {/* Profile View if signed in */}
-            {currentUser.userId && currentUser.userId !== 'anonymous' ? (
+            {isAuthenticated && currentUser.userId ? (
               <div className="space-y-4 text-xs">
                 <div className="p-4 rounded-xl border border-slate-700 bg-slate-900/60 space-y-2">
                   <div className="flex items-center space-x-3">
                     <div className="w-10 h-10 rounded-full bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center font-bold text-cyan-300 text-sm">
-                      {currentUser.displayName.charAt(0).toUpperCase()}
+                      {(currentUser.displayName || 'U').charAt(0).toUpperCase()}
                     </div>
                     <div>
                       <div className="font-bold text-slate-200 text-sm">{currentUser.displayName}</div>
@@ -4764,11 +5421,22 @@ await withCCKGuard(
                       <span className="text-cyan-400 font-semibold">{currentUser.role.toUpperCase()}</span>
                     </div>
                     <div className="flex justify-between text-slate-400">
-                      <span>Persistence:</span>
-                      <span className="text-emerald-400 font-semibold">Firebase Firestore</span>
+                      <span>Auth Provider:</span>
+                      <span className="text-emerald-400 font-semibold uppercase">{currentUser.authProvider || 'password'}</span>
                     </div>
                   </div>
                 </div>
+
+                {currentUser.authProvider === 'sandbox' && (
+                  <button
+                    type="button"
+                    onClick={handleGoogleSignIn}
+                    className="w-full py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs flex items-center justify-center space-x-2 transition-colors"
+                  >
+                    <Users className="w-4 h-4" />
+                    <span>ربط بحساب Google للحفظ الدائم</span>
+                  </button>
+                )}
 
                 <button
                   type="button"
@@ -4776,7 +5444,7 @@ await withCCKGuard(
                   className="w-full py-2.5 rounded-xl border border-rose-500/40 bg-rose-950/30 hover:bg-rose-950/50 text-rose-300 font-semibold text-xs flex items-center justify-center space-x-2 transition-colors"
                 >
                   <LogOut className="w-4 h-4" />
-                  <span>Sign Out</span>
+                  <span>تسجيل الخروج | Sign Out</span>
                 </button>
               </div>
             ) : (
@@ -4919,13 +5587,33 @@ await withCCKGuard(
         </div>
       )}
 
+      {/* Interactive Agent Verification Playground & Integration Code Modal */}
+      <AgentPlaygroundModal
+        agent={playgroundAgent}
+        isOpen={showPlaygroundModal}
+        onClose={() => {
+          setShowPlaygroundModal(false);
+          setPlaygroundAgent(null);
+        }}
+        currentUser={currentUser}
+        activeProjectId={activeProjectId}
+        isDark={isDark}
+        apiFetch={authFetch}
+        onEvaluated={() => {
+          fetchAgents();
+          fetchAudits();
+          fetchReceipts();
+          fetchStatus();
+        }}
+      />
+
       {/* ------------------------------------------------------- */}
       {/* Footer */}
       {/* ------------------------------------------------------- */}
       <footer className={`border-t py-6 mt-auto text-xs ${borderSubtle} ${textMuted}`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center space-x-2 font-mono text-[11px]">
-            <span>CCK — Agent Reliability & Causal Continuity Platform</span>
+            <span>CCK — Decision Integrity Infrastructure for AI Agents</span>
             <span>•</span>
             <span>Apache 2.0 Open Source</span>
           </div>
@@ -4934,7 +5622,7 @@ await withCCKGuard(
             <span>•</span>
             <span>Multi-Tenant Ready</span>
             <span>•</span>
-            <span>SQLite WAL</span>
+            <span className="text-emerald-400 font-semibold">Firebase Firestore Persistent</span>
           </div>
         </div>
       </footer>

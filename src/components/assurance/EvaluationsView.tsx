@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Gauge,
   Play,
@@ -20,6 +20,8 @@ interface EvaluationsViewProps {
   receipts: SkillImpactReceiptRecord[];
   skills: SkillRecord[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -31,6 +33,8 @@ export const EvaluationsView: React.FC<EvaluationsViewProps> = ({
   receipts,
   skills,
   onRefresh,
+  tenantId: _tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -38,17 +42,24 @@ export const EvaluationsView: React.FC<EvaluationsViewProps> = ({
   borderSubtle,
 }) => {
   const [evaluatingSkillId, setEvaluatingSkillId] = useState<string | null>(null);
-  const [selectedSkillId, setSelectedSkillId] = useState<string>(skills[0]?.skill_id || 'skl-stripe-billing');
+  const [selectedSkillId, setSelectedSkillId] = useState<string>(skills[0]?.skill_id || 'skl-stripe-checkout');
   const [togglingReceiptId, setTogglingReceiptId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (skills.length > 0 && !skills.some((s) => s.skill_id === selectedSkillId)) {
+      setSelectedSkillId(skills[0].skill_id);
+    }
+  }, [skills, selectedSkillId]);
 
   const handleRunEvaluation = async () => {
     if (!selectedSkillId) return;
     setEvaluatingSkillId(selectedSkillId);
     try {
-      const res = await fetch(`/api/v1/skills/${selectedSkillId}/evaluate-impact`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/skills/${selectedSkillId}/evaluate-impact`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_name: 'payment_dispatch_benchmark', iterations: 20 }),
+        body: JSON.stringify({ task_name: 'payment_dispatch_benchmark', sampleSize: 20, iterations: 20 }),
       });
       if (res.ok) {
         onRefresh();
@@ -63,10 +74,14 @@ export const EvaluationsView: React.FC<EvaluationsViewProps> = ({
   const handleTogglePrivacy = async (receiptId: string, currentShareState: boolean) => {
     setTogglingReceiptId(receiptId);
     try {
-      const res = await fetch(`/api/v1/skills/impact-receipts/${receiptId}/privacy`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/skills/impact-receipts/${receiptId}/privacy`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ allow_external_sharing: !currentShareState }),
+        body: JSON.stringify({
+          external_sharing_enabled: !currentShareState,
+          allow_external_sharing: !currentShareState,
+        }),
       });
       if (res.ok) {
         onRefresh();

@@ -21,6 +21,8 @@ import type { McpServerRecord, McpToolSchema } from '../../governance/types';
 interface McpGovernanceViewProps {
   servers: McpServerRecord[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -31,6 +33,8 @@ interface McpGovernanceViewProps {
 export const McpGovernanceView: React.FC<McpGovernanceViewProps> = ({
   servers,
   onRefresh,
+  tenantId: _tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -43,11 +47,16 @@ export const McpGovernanceView: React.FC<McpGovernanceViewProps> = ({
   const [actionMsg, setActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [confirmRevokeServerId, setConfirmRevokeServerId] = useState<string | null>(null);
 
+  const liveOrigin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : 'http://localhost:3000';
+
   // Register Form
   const [regForm, setRegForm] = useState({
     name: 'Logistics Courier MCP',
     transport: 'STREAMABLE_HTTP' as any,
-    endpoint_url: 'http://localhost:3000/api/v1/mcp/courier',
+    endpoint_url: `${liveOrigin}/api/v1/mcp/courier`,
     version: '1.1.0',
     tool_name: 'dispatch_fedex_shipment',
     tool_desc: 'Dispatches parcel to international shipping lane',
@@ -57,7 +66,8 @@ export const McpGovernanceView: React.FC<McpGovernanceViewProps> = ({
   const handleApproveServer = async (serverId: string) => {
     setActionMsg(null);
     try {
-      const res = await fetch(`/api/v1/mcp/servers/${serverId}/approve`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/mcp/servers/${serverId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reviewer: 'security-admin-officer' }),
@@ -77,7 +87,8 @@ export const McpGovernanceView: React.FC<McpGovernanceViewProps> = ({
   const handleSuspendServer = async (serverId: string) => {
     setActionMsg(null);
     try {
-      const res = await fetch(`/api/v1/mcp/servers/${serverId}/suspend`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/mcp/servers/${serverId}/suspend`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Manual supervisor temporary suspension' }),
@@ -97,7 +108,8 @@ export const McpGovernanceView: React.FC<McpGovernanceViewProps> = ({
   const executeRevokeServer = async (serverId: string) => {
     setActionMsg(null);
     try {
-      const res = await fetch(`/api/v1/mcp/servers/${serverId}/revoke`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/mcp/servers/${serverId}/revoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Permanent security revocation' }),
@@ -132,7 +144,8 @@ export const McpGovernanceView: React.FC<McpGovernanceViewProps> = ({
         },
       ];
 
-      const res = await fetch(`/api/v1/mcp/servers/${selectedServer.server_id}/tools/sync`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/mcp/servers/${selectedServer.server_id}/tools/sync`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ new_tools: driftedTools }),

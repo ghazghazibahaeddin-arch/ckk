@@ -19,6 +19,8 @@ import type { CapabilityEvidenceReceiptRecord } from '../../governance/types';
 interface CapabilityEvidenceViewProps {
   receipts: CapabilityEvidenceReceiptRecord[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -29,6 +31,8 @@ interface CapabilityEvidenceViewProps {
 export const CapabilityEvidenceView: React.FC<CapabilityEvidenceViewProps> = ({
   receipts,
   onRefresh,
+  tenantId: _tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -55,7 +59,8 @@ export const CapabilityEvidenceView: React.FC<CapabilityEvidenceViewProps> = ({
     setEvaluating(true);
     setActionMsg(null);
     try {
-      const res = await fetch(`/api/v1/agents/${evalForm.agent_id}/evaluate-capability`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/agents/${evalForm.agent_id}/evaluate-capability`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

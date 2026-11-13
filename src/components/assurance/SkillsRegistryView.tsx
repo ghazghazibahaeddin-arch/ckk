@@ -19,6 +19,8 @@ import type { SkillRecord } from '../../assurance/types';
 interface SkillsRegistryViewProps {
   skills: SkillRecord[];
   onRefresh: () => void;
+  tenantId?: string;
+  apiFetch?: (url: string, init?: RequestInit) => Promise<Response>;
   isDark: boolean;
   bgCard: string;
   bgSubtle: string;
@@ -29,6 +31,8 @@ interface SkillsRegistryViewProps {
 export const SkillsRegistryView: React.FC<SkillsRegistryViewProps> = ({
   skills,
   onRefresh,
+  tenantId: _tenantId,
+  apiFetch,
   isDark,
   bgCard,
   bgSubtle,
@@ -67,7 +71,8 @@ export const SkillsRegistryView: React.FC<SkillsRegistryViewProps> = ({
   const handleRegisterSkill = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('/api/v1/skills', {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher('/api/v1/skills', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -103,7 +108,8 @@ export const SkillsRegistryView: React.FC<SkillsRegistryViewProps> = ({
     if (!selectedSkill) return;
     setReviewing(true);
     try {
-      const res = await fetch(`/api/v1/skills/${selectedSkill.skill_id}/review`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/skills/${selectedSkill.skill_id}/review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(reviewForm),
@@ -123,7 +129,8 @@ export const SkillsRegistryView: React.FC<SkillsRegistryViewProps> = ({
   const executeRevokeSkill = async (skillId: string) => {
     setRevokingId(skillId);
     try {
-      const res = await fetch(`/api/v1/skills/${skillId}/revoke`, {
+      const fetcher = apiFetch || fetch;
+      const res = await fetcher(`/api/v1/skills/${skillId}/revoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Revoked via security operations console' }),

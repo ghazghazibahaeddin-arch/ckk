@@ -3,7 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // -------------------------------------------------------------
-    // Helper Functions & Security Guards
+    // Helper Functions & Zero-Trust Security Guards
     // -------------------------------------------------------------
     function isAuthenticated() {
       return request.auth != null;
@@ -13,21 +13,50 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
     function isDocSizeValid(maxFields) {
       return request.resource.data.size() <= maxFields;
     }
 
     // -------------------------------------------------------------
-    // User Profiles & Roles
+    // System Connection Probe (Read-Only Single Doc)
+    // -------------------------------------------------------------
+    match /system/connection_probe {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // -------------------------------------------------------------
+    // User Profiles & Roles (Strict PII Owner Isolation)
     // -------------------------------------------------------------
     match /users/{userId} {
-      allow read: if isAuthenticated();
+      allow get: if isOwner(userId);
+      allow list: if false;
       allow create: if isOwner(userId)
-                    && request.resource.data.id == userId
+                    && isValidId(userId)
+                    && incoming().id == userId
+                    && incoming().uid == userId
+                    && incoming().email is string
+                    && incoming().email.size() <= 254
+                    && incoming().role in ['developer', 'operator']
                     && isDocSizeValid(15);
       allow update: if isOwner(userId)
-                    && request.resource.data.id == userId
-                    && request.resource.data.created_at == resource.data.created_at
+                    && isValidId(userId)
+                    && incoming().id == existing().id
+                    && incoming().uid == existing().uid
+                    && incoming().role == existing().role
+                    && incoming().created_at == existing().created_at
                     && isDocSizeValid(15);
       allow delete: if false;
     }
@@ -36,96 +65,134 @@ service cloud.firestore {
     // Multi-Tenant Workspaces
     // -------------------------------------------------------------
     match /workspaces/{workspaceId} {
-      allow read: if isAuthenticated() && (resource.data.owner_uid == request.auth.uid || resource.data.members.hasAny([request.auth.uid]));
+      allow get: if isAuthenticated() && (existing().owner_uid == request.auth.uid || (existing().members is list && existing().members.hasAny([request.auth.uid])));
+      allow list: if isAuthenticated() && existing().owner_uid == request.auth.uid;
       allow create: if isAuthenticated()
-                    && request.resource.data.workspace_id == workspaceId
-                    && request.resource.data.owner_uid == request.auth.uid
+                    && isValidId(workspaceId)
+                    && incoming().workspace_id == workspaceId
+                    && incoming().owner_uid == request.auth.uid
+                    && incoming().name is string
+                    && incoming().name.size() > 0
+                    && incoming().name.size() <= 120
                     && isDocSizeValid(15);
       allow update: if isAuthenticated()
-                    && resource.data.owner_uid == request.auth.uid
-                    && request.resource.data.owner_uid == resource.data.owner_uid
+                    && isValidId(workspaceId)
+                    && existing().owner_uid == request.auth.uid
+                    && incoming().owner_uid == existing().owner_uid
+                    && incoming().workspace_id == existing().workspace_id
                     && isDocSizeValid(15);
-      allow delete: if isAuthenticated() && resource.data.owner_uid == request.auth.uid;
+      allow delete: if isAuthenticated() && isValidId(workspaceId) && existing().owner_uid == request.auth.uid;
     }
 
     // -------------------------------------------------------------
-    // Projects (Scoped to Workspace/Owner)
+    // Projects (Scoped Strictly to Owner UID)
     // -------------------------------------------------------------
     match /projects/{projectId} {
-      allow read: if isAuthenticated();
+      allow get, list: if isAuthenticated() && existing().owner_uid == request.auth.uid;
       allow create: if isAuthenticated()
-                    && request.resource.data.project_id == projectId
-                    && request.resource.data.name is string
-                    && request.resource.data.name.size() > 0
-                    && request.resource.data.name.size() <= 100
+                    && isValidId(projectId)
+                    && incoming().project_id == projectId
+                    && incoming().owner_uid == request.auth.uid
+                    && incoming().name is string
+                    && incoming().name.size() > 0
+                    && incoming().name.size() <= 100
                     && isDocSizeValid(20);
       allow update: if isAuthenticated()
-                    && request.resource.data.project_id == resource.data.project_id
-                    && request.resource.data.created_at == resource.data.created_at
+                    && isValidId(projectId)
+                    && existing().owner_uid == request.auth.uid
+                    && incoming().owner_uid == existing().owner_uid
+                    && incoming().project_id == existing().project_id
+                    && incoming().created_at == existing().created_at
                     && isDocSizeValid(20);
-      allow delete: if isAuthenticated();
+      allow delete: if isAuthenticated() && isValidId(projectId) && existing().owner_uid == request.auth.uid;
     }
 
     // -------------------------------------------------------------
-    // AI Agents Registry
+    // AI Agents Registry (Scoped Strictly to Owner UID)
     // -------------------------------------------------------------
     match /agents/{agentId} {
-      allow read: if isAuthenticated();
+      allow get, list: if isAuthenticated() && existing().owner_uid == request.auth.uid;
       allow create: if isAuthenticated()
-                    && request.resource.data.agent_id == agentId
-                    && request.resource.data.name is string
-                    && request.resource.data.target_capability is string
+                    && isValidId(agentId)
+                    && incoming().agent_id == agentId
+                    && incoming().owner_uid == request.auth.uid
+                    && incoming().name is string
+                    && incoming().name.size() > 0
+                    && incoming().name.size() <= 120
+                    && incoming().target_capability is string
+                    && incoming().target_capability.size() <= 120
                     && isDocSizeValid(25);
       allow update: if isAuthenticated()
-                    && request.resource.data.agent_id == resource.data.agent_id
-                    && request.resource.data.created_at == resource.data.created_at
+                    && isValidId(agentId)
+                    && existing().owner_uid == request.auth.uid
+                    && incoming().owner_uid == existing().owner_uid
+                    && incoming().agent_id == existing().agent_id
+                    && incoming().created_at == existing().created_at
                     && isDocSizeValid(25);
-      allow delete: if isAuthenticated();
+      allow delete: if isAuthenticated() && isValidId(agentId) && existing().owner_uid == request.auth.uid;
     }
 
     // -------------------------------------------------------------
-    // Facts & Cryptographic Evidence
+    // Facts & Cryptographic Evidence (Owner Isolated)
     // -------------------------------------------------------------
     match /facts/{factId} {
-      allow read: if isAuthenticated();
-      allow create, update: if isAuthenticated()
-                            && request.resource.data.entity_id is string
-                            && request.resource.data.field_name is string
-                            && isDocSizeValid(20);
-      allow delete: if isAuthenticated();
+      allow get, list: if isAuthenticated() && existing().owner_uid == request.auth.uid;
+      allow create: if isAuthenticated()
+                    && isValidId(factId)
+                    && incoming().owner_uid == request.auth.uid
+                    && incoming().entity_id is string
+                    && incoming().entity_id.size() <= 128
+                    && incoming().field_name is string
+                    && incoming().field_name.size() <= 128
+                    && isDocSizeValid(20);
+      allow update: if isAuthenticated()
+                    && isValidId(factId)
+                    && existing().owner_uid == request.auth.uid
+                    && incoming().owner_uid == existing().owner_uid
+                    && isDocSizeValid(20);
+      allow delete: if isAuthenticated() && isValidId(factId) && existing().owner_uid == request.auth.uid;
     }
 
     match /evidence/{evidenceId} {
-      allow read: if isAuthenticated();
+      allow get, list: if isAuthenticated() && existing().owner_uid == request.auth.uid;
       allow create: if isAuthenticated()
-                    && request.resource.data.evidence_id == evidenceId
-                    && request.resource.data.payload_hash is string
+                    && isValidId(evidenceId)
+                    && incoming().owner_uid == request.auth.uid
+                    && incoming().evidence_id == evidenceId
+                    && incoming().payload_hash is string
+                    && incoming().payload_hash.size() <= 128
                     && isDocSizeValid(20);
       allow update, delete: if false; // Evidence is immutable once observed
     }
 
     // -------------------------------------------------------------
-    // Decision Receipts (Shareable Verification Artifacts)
+    // Decision Receipts (Exact-ID Verifiable, Owner-Scoped List)
     // -------------------------------------------------------------
     match /receipts/{receiptId} {
-      // Publicly verifiable by cryptographic receipt ID
-      allow read: if true;
+      allow get: if isValidId(receiptId);
+      allow list: if isAuthenticated() && existing().owner_uid == request.auth.uid;
       allow create: if isAuthenticated()
-                    && request.resource.data.receipt_id == receiptId
-                    && request.resource.data.verdict != null
-                    && isDocSizeValid(30);
+                    && isValidId(receiptId)
+                    && incoming().owner_uid == request.auth.uid
+                    && incoming().receipt_id == receiptId
+                    && incoming().verdict != null
+                    && isDocSizeValid(35);
       allow update, delete: if false; // Decision receipts are immutable
     }
 
     // -------------------------------------------------------------
-    // Audit Ledger (Strict Append-Only Immutable Chain)
+    // Audit Ledger (Strict Append-Only Immutable Chain, Owner-Scoped)
     // -------------------------------------------------------------
     match /audit_events/{eventId} {
-      allow read: if isAuthenticated();
+      allow get, list: if isAuthenticated() && existing().owner_uid == request.auth.uid;
       allow create: if isAuthenticated()
-                    && request.resource.data.audit_id == eventId
-                    && request.resource.data.action_hash is string
-                    && request.resource.data.previous_hash is string
+                    && isValidId(eventId)
+                    && incoming().owner_uid == request.auth.uid
+                    && incoming().audit_id == eventId
+                    && incoming().action_hash is string
+                    && incoming().action_hash.size() <= 128
+                    && incoming().previous_hash is string
+                    && incoming().previous_hash.size() <= 128
                     && isDocSizeValid(25);
       allow update, delete: if false; // Immutable tamper-evident audit ledger
     }

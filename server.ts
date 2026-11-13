@@ -11,13 +11,14 @@
  * 7. Multi-Tenant Project and API Key Hashed Storage
  */
 
-import express, { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import {
+import type {
   ActionContractRecord,
   ContractExecutionRecord,
   FactVersionHistoryRecord,
@@ -37,7 +38,7 @@ import {
   runControlledSkillEvaluation,
   executeReplayPackHarness,
 } from './src/assurance/assurance_engine.ts';
-import {
+import type {
   DelegationRecord,
   DelegationChainVerificationResult,
   BudgetPolicyRecord,
@@ -233,6 +234,7 @@ export interface AuditRecord {
   audit_id: string;
   action_id: string;
   agent_id: string;
+  tenant_id?: string;
   action_hash: string;
   previous_hash: string;
   verdict: {
@@ -248,6 +250,7 @@ export interface AuditRecord {
 export interface DecisionReceiptRecord {
   receipt_id: string;
   action_id: string;
+  tenant_id?: string;
   timestamp: string;
   status: 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL' | 'REVALIDATE';
   action: {
@@ -319,7 +322,20 @@ export interface AgentRecord {
   key_id?: string;
 }
 
+export interface UserAccountRecord {
+  user_id: string;
+  username: string;
+  email?: string;
+  display_name: string;
+  password_hash: string;
+  role: 'admin' | 'supervisor' | 'operator' | 'developer';
+  tenant_id: string;
+  auth_provider: 'password' | 'firebase' | 'sandbox';
+  created_at: string;
+}
+
 interface CCKDatabaseSchema {
+  users: UserAccountRecord[];
   workspaces: WorkspaceRecord[];
   projects: ProjectRecord[];
   agents: AgentRecord[];
@@ -355,6 +371,7 @@ interface CCKDatabaseSchema {
 // Durable State & Persistence Engine
 // -------------------------------------------------------------
 let dbState: CCKDatabaseSchema = {
+  users: [],
   workspaces: [],
   projects: [],
   agents: [],
@@ -761,7 +778,29 @@ function getInitialCleanDatabase(): CCKDatabaseSchema {
     }),
   ];
 
+  const seededExecutions: ContractExecutionRecord[] = [
+    {
+      execution_id: 'exec-settled-tx-998',
+      contract_id: 'ctrc-logistics-standard',
+      idempotency_key: 'seed-settled-998',
+      agent_id: 'agt-console',
+      capability: 'financial.settlement',
+      target: 'order:tx_settled_998',
+      target_resource: 'order:tx_settled_998',
+      command: 'settle_invoice(order:tx_settled_998)',
+      parameters: { entity_id: 'order:tx_settled_998', order_id: 'order:tx_settled_998', amount: 250, currency: 'USD' },
+      state: 'SUCCEEDED',
+      external_status_verified: true,
+      external_check_status: 'CONFIRMED_COMMITTED',
+      compensation_supported: false,
+      result_evidence: { payload_hash: crypto.createHash('sha256').update('order:tx_settled_998').digest('hex') },
+      created_at: new Date(Date.now() - 3600000).toISOString(),
+      updated_at: new Date(Date.now() - 3600000).toISOString(),
+    },
+  ];
+
   return {
+    users: [],
     workspaces: [],
     projects: [],
     agents: [],
@@ -775,7 +814,7 @@ function getInitialCleanDatabase(): CCKDatabaseSchema {
     receipts: [],
     lastChainHash: '0000000000000000000000000000000000000000000000000000000000000000',
     contracts: defaultContracts,
-    contractExecutions: [],
+    contractExecutions: seededExecutions,
     factHistory: [],
     conflicts: [],
     revalidations: [],
@@ -797,6 +836,7 @@ function loadDatabase(): void {
     if (fs.existsSync(DATA_FILE)) {
       const raw = fs.readFileSync(DATA_FILE, 'utf-8');
       dbState = JSON.parse(raw);
+      if (!Array.isArray(dbState.users)) dbState.users = [];
       if (!Array.isArray(dbState.receipts)) dbState.receipts = [];
       if (!Array.isArray(dbState.agents)) dbState.agents = [];
       if (!Array.isArray(dbState.contracts)) dbState.contracts = [];
@@ -818,6 +858,9 @@ function loadDatabase(): void {
       // Seed defaults if empty
       const clean = getInitialCleanDatabase();
       if (dbState.contracts.length === 0) dbState.contracts = clean.contracts;
+      if (!dbState.contractExecutions.some((e) => e.execution_id === 'exec-settled-tx-998')) {
+        dbState.contractExecutions.push(...clean.contractExecutions);
+      }
       if (dbState.mandates.length === 0) dbState.mandates = clean.mandates;
       if (dbState.skills.length === 0) dbState.skills = clean.skills;
       if (dbState.incidents.length === 0) dbState.incidents = clean.incidents;
@@ -837,6 +880,95 @@ function loadDatabase(): void {
 
   dbState = getInitialCleanDatabase();
   persistDatabase();
+}
+
+function hashPasswordScrypt(password: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${derived}`;
+}
+
+function verifyPasswordScrypt(password: string, storedHash: string): boolean {
+  if (!storedHash || !storedHash.includes(':')) return false;
+  const [salt, keyHex] = storedHash.split(':');
+  if (!salt || !keyHex) return false;
+  const keyBuf = Buffer.from(keyHex, 'hex');
+  const derivedBuf = crypto.scryptSync(password, salt, 64);
+  return keyBuf.length === derivedBuf.length && crypto.timingSafeEqual(keyBuf, derivedBuf);
+}
+
+function ensureTenantStarterResources(
+  tenantId: string,
+  ownerLabel: string = 'Workspace'
+): { project: ProjectRecord; agent: AgentRecord } {
+  const safeSuffix = tenantId.replace(/[^a-zA-Z0-9]/g, '').slice(-8) || crypto.randomUUID().slice(0, 8);
+  let project = dbState.projects.find((p) => p.tenant_id === tenantId);
+  if (!project) {
+    project = {
+      project_id: `proj-${safeSuffix}`,
+      name: `${ownerLabel} Workspace`,
+      tenant_id: tenantId,
+      description: 'Dedicated Decision Integrity Infrastructure workspace',
+      connectors: ['in_memory_sandbox'],
+      rate_limit_per_minute: 2500,
+      active_agents: 1,
+      created_at: new Date().toISOString(),
+    };
+    dbState.projects.unshift(project);
+  }
+
+  let agent = dbState.agents.find((a) => a.tenant_id === tenantId);
+  if (!agent) {
+    agent = {
+      agent_id: `agt-${safeSuffix}`,
+      project_id: project.project_id,
+      tenant_id: tenantId,
+      name: 'SupportGuardianBot',
+      framework: 'openai',
+      target_capability: 'orders.refund',
+      target_resource: 'stripe.charges',
+      guardrail_mode: 'ENFORCE_AND_BLOCK',
+      freshness_ttl_seconds: 300,
+      created_at: new Date().toISOString(),
+      total_evaluations: 0,
+      blocked_evaluations: 0,
+      status: 'DISCONNECTED',
+    };
+    dbState.agents.unshift(agent);
+  }
+
+  const hasBudget = dbState.budgets.some((b) => b.tenant_id === tenantId && b.scope_type === 'TENANT');
+  if (!hasBudget) {
+    const now = new Date().toISOString();
+    dbState.budgets.unshift({
+      budget_id: `bgt-${safeSuffix}`,
+      tenant_id: tenantId,
+      scope_type: 'TENANT',
+      scope_id: tenantId,
+      limits: {
+        max_budget_usd: 100.0,
+        max_model_calls: 5000,
+        max_tool_calls: 10000,
+        max_retries: 3,
+        max_delegation_depth: 4,
+        max_execution_timeout_ms: 30000,
+        max_concurrent_runs: 10,
+      },
+      usage: {
+        spent_usd: 0,
+        model_calls: 0,
+        tool_calls: 0,
+        retries: 0,
+        active_concurrent_runs: 0,
+      },
+      status: 'ACTIVE',
+      created_at: now,
+      updated_at: now,
+    });
+  }
+
+  persistDatabase();
+  return { project, agent };
 }
 
 // -------------------------------------------------------------
@@ -875,6 +1007,7 @@ export function mintDecisionReceipt(params: {
   target: string;
   command: string;
   severity?: string;
+  tenantId?: string;
   verdict: {
     decision: 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL' | 'REVALIDATE';
     risk_score: number;
@@ -916,9 +1049,10 @@ export function mintDecisionReceipt(params: {
     (d) => params.capability.startsWith(d.action_capability.replace('*', '')) || d.action_capability === '*'
   );
 
-  const receipt: DecisionReceiptRecord = {
+  const receipt: DecisionReceiptRecord & { tenant_id?: string } = {
     receipt_id: receiptId,
     action_id: params.actionId,
+    tenant_id: params.tenantId,
     timestamp,
     status: params.verdict.decision,
     action: {
@@ -974,7 +1108,8 @@ function recordAuditEntry(
   riskScore: number,
   reasoning: string,
   executionStatus: string,
-  isDemo: boolean = false
+  isDemo: boolean = false,
+  tenantId?: string
 ): AuditRecord {
   const auditId = `aud-${crypto.randomUUID().slice(0, 10)}`;
   const recordedAt = new Date().toISOString();
@@ -985,6 +1120,7 @@ function recordAuditEntry(
     audit_id: auditId,
     action_id: actionId,
     agent_id: agentId,
+    tenant_id: tenantId,
     action_hash: actionHash,
     previous_hash: dbState.lastChainHash,
     verdict: {
@@ -1082,36 +1218,161 @@ app.get('/api/v1/system/status', (_req: Request, res: Response) => {
   });
 });
 
-// Authentication
-app.post('/api/v1/auth/login', (req: Request, res: Response) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ detail: 'Username and password required' });
+// Authentication & Real Multi-Tenant Workspace Hydration
+app.post('/api/v1/auth/register', (req: Request, res: Response) => {
+  const { username, password, display_name, email } = req.body || {};
+  const cleanUsername = String(username || '').trim().toLowerCase();
+  if (!cleanUsername || !password || String(password).length < 6) {
+    return res.status(400).json({ detail: 'Valid username and password (min 6 chars) are required.' });
   }
-  res.json({
-    token: `cck-token-${username}-${Date.now()}`,
+  if (!dbState.users) dbState.users = [];
+  if (dbState.users.some((u) => u.username.toLowerCase() === cleanUsername)) {
+    return res.status(409).json({ detail: 'Username already registered. Please sign in instead.' });
+  }
+
+  const userId = `usr-${crypto.randomUUID().slice(0, 8)}`;
+  const tenantId = `tenant_${userId}`;
+  const now = new Date().toISOString();
+  const safeDisplayName = String(display_name || username).trim().slice(0, 80);
+
+  const userRecord: UserAccountRecord = {
+    user_id: userId,
+    username: cleanUsername,
+    email: email ? String(email).trim() : undefined,
+    display_name: safeDisplayName,
+    password_hash: hashPasswordScrypt(String(password)),
+    role: 'supervisor', // Least-privilege: never self-grant admin via public signup
+    tenant_id: tenantId,
+    auth_provider: 'password',
+    created_at: now,
+  };
+
+  dbState.users.unshift(userRecord);
+  const starter = ensureTenantStarterResources(tenantId, safeDisplayName);
+  persistDatabase();
+
+  res.status(201).json({
+    token: `cck-token-${userId}-${crypto.randomBytes(12).toString('hex')}`,
     user: {
-      user_id: `usr-${username}`,
-      username,
-      display_name: username === 'admin' ? 'Security Architect' : username,
-      role: username === 'admin' ? 'admin' : 'operator',
-      tenant_id: 'tenant-corp-acme',
+      user_id: userRecord.user_id,
+      username: userRecord.username,
+      email: userRecord.email,
+      display_name: userRecord.display_name,
+      role: userRecord.role,
+      tenant_id: userRecord.tenant_id,
+      auth_provider: userRecord.auth_provider,
     },
+    starter_project: starter.project,
   });
 });
 
-app.post('/api/v1/auth/register', (req: Request, res: Response) => {
-  const { username, display_name } = req.body;
+app.post('/api/v1/auth/login', (req: Request, res: Response) => {
+  const { username, password } = req.body || {};
+  const cleanUsername = String(username || '').trim().toLowerCase();
+  if (!cleanUsername || !password) {
+    return res.status(400).json({ detail: 'Username and password required.' });
+  }
+
+  const existing = (dbState.users || []).find((u) => u.username.toLowerCase() === cleanUsername);
+  if (!existing || !verifyPasswordScrypt(String(password), existing.password_hash)) {
+    return res.status(401).json({ detail: 'Invalid username or password.' });
+  }
+
+  const starter = ensureTenantStarterResources(existing.tenant_id, existing.display_name);
+  persistDatabase();
+
   res.json({
-    token: `cck-token-${username}-${Date.now()}`,
+    token: `cck-token-${existing.user_id}-${crypto.randomBytes(12).toString('hex')}`,
     user: {
-      user_id: `usr-${username}`,
-      username,
-      display_name: display_name || username,
-      role: 'operator',
-      tenant_id: 'tenant-corp-acme',
+      user_id: existing.user_id,
+      username: existing.username,
+      email: existing.email,
+      display_name: existing.display_name,
+      role: existing.role,
+      tenant_id: existing.tenant_id,
+      auth_provider: existing.auth_provider,
     },
+    starter_project: starter.project,
   });
+});
+
+app.post('/api/v1/auth/firebase-session', (req: Request, res: Response) => {
+  const { uid, email, displayName, isSandbox } = req.body || {};
+  if (!uid || typeof uid !== 'string') {
+    return res.status(400).json({ detail: 'uid is required.' });
+  }
+  const safeUid = uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+  const tenantId = `tenant_${safeUid}`;
+  const label = String(displayName || email || (isSandbox ? 'Sandbox Explorer' : safeUid)).slice(0, 80);
+
+  const starter = ensureTenantStarterResources(tenantId, label);
+  persistDatabase();
+
+  res.json({
+    token: `cck-token-${safeUid}-${crypto.randomBytes(12).toString('hex')}`,
+    user: {
+      user_id: `usr-${safeUid.slice(0, 16)}`,
+      username: email || safeUid,
+      email: email || undefined,
+      display_name: label,
+      role: 'supervisor',
+      tenant_id: tenantId,
+      auth_provider: isSandbox ? 'sandbox' : 'firebase',
+    },
+    project: starter.project,
+    agent: starter.agent,
+  });
+});
+
+app.post('/api/v1/workspace/sync', (req: Request, res: Response) => {
+  const { tenant_id, projects, agents } = req.body || {};
+  const headerTenant = (req.headers['x-tenant-id'] as string) || '';
+  const targetTenant = String(tenant_id || headerTenant || '').trim();
+  if (!targetTenant) {
+    return res.status(400).json({ detail: 'tenant_id is required.' });
+  }
+  if (headerTenant && headerTenant !== targetTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant workspace sync prohibited.' });
+  }
+
+  let syncedProjects = 0;
+  let syncedAgents = 0;
+
+  if (Array.isArray(projects)) {
+    for (const p of projects) {
+      if (!p?.project_id) continue;
+      const existing = dbState.projects.find((ep) => ep.project_id === p.project_id);
+      if (existing && existing.tenant_id !== targetTenant) continue; // Prevent cross-tenant overwrite
+      if (!existing) {
+        dbState.projects.unshift({
+          ...p,
+          tenant_id: targetTenant,
+          created_at: p.created_at || new Date().toISOString(),
+        });
+        syncedProjects++;
+      }
+    }
+  }
+
+  if (Array.isArray(agents)) {
+    for (const a of agents) {
+      if (!a?.agent_id) continue;
+      const existing = dbState.agents.find((ea) => ea.agent_id === a.agent_id);
+      if (existing && existing.tenant_id !== targetTenant) continue; // Prevent cross-tenant overwrite
+      if (!existing) {
+        dbState.agents.unshift({
+          ...a,
+          tenant_id: targetTenant,
+          created_at: a.created_at || new Date().toISOString(),
+        });
+        syncedAgents++;
+      }
+    }
+  }
+
+  ensureTenantStarterResources(targetTenant, 'Workspace Owner');
+  persistDatabase();
+  res.json({ status: 'synced', tenant_id: targetTenant, synced_projects: syncedProjects, synced_agents: syncedAgents });
 });
 
 // Workspaces & Projects Management
@@ -1163,6 +1424,11 @@ app.delete('/api/v1/projects/:id', (req: Request, res: Response) => {
 
 // API Keys Management (Sanitized: key_hash is NEVER exposed)
 app.get('/api/v1/projects/:id/keys', (req: Request, res: Response) => {
+  const proj = dbState.projects.find((p) => p.project_id === req.params.id);
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (proj && callerTenant && proj.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant API key inspection prohibited.' });
+  }
   const projKeys = dbState.apiKeys
     .filter((k) => k.project_id === req.params.id)
     .map(({ key_id, project_id, name, key_prefix, created_at, is_active }) => ({
@@ -1177,7 +1443,12 @@ app.get('/api/v1/projects/:id/keys', (req: Request, res: Response) => {
 });
 
 app.post('/api/v1/projects/:id/keys', (req: Request, res: Response) => {
-  const { name } = req.body;
+  const proj = dbState.projects.find((p) => p.project_id === req.params.id);
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (proj && callerTenant && proj.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant API key creation prohibited.' });
+  }
+  const { name } = req.body || {};
   const keyId = `key-${crypto.randomUUID().slice(0, 8)}`;
   const suffix = crypto.randomUUID().replace(/-/g, '');
   const plaintextToken = `cck_live_${req.params.id.slice(0, 6)}_${suffix}`;
@@ -1214,9 +1485,14 @@ app.delete('/api/v1/projects/:projId/keys/:keyId', (req: Request, res: Response)
     return res.status(404).json({ detail: 'Key not found' });
   }
 
-  // Cross-project key revocation protection
+  // Cross-project & cross-tenant key revocation protection
   if (key.project_id !== req.params.projId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Key does not belong to specified project.' });
+  }
+  const proj = dbState.projects.find((p) => p.project_id === req.params.projId);
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (proj && callerTenant && proj.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant key revocation prohibited.' });
   }
 
   key.is_active = false;
@@ -1224,15 +1500,60 @@ app.delete('/api/v1/projects/:projId/keys/:keyId', (req: Request, res: Response)
   return res.json({ status: 'revoked', key_id: req.params.keyId });
 });
 
+app.post('/api/v1/agents/:id/keys', (req: Request, res: Response) => {
+  const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
+  if (!agent) {
+    return res.status(404).json({ detail: 'Agent not found' });
+  }
+  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  if (callerTenant && agent.tenant_id && callerTenant !== agent.tenant_id) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent key generation prohibited.' });
+  }
+
+  const keyId = `key-${crypto.randomUUID().slice(0, 8)}`;
+  const suffix = crypto.randomUUID().replace(/-/g, '');
+  const plaintextToken = `cck_live_${agent.project_id.slice(0, 6)}_${suffix}`;
+  const keyPrefix = `cck_live_${suffix.slice(0, 4)}...`;
+  const keyHash = crypto.createHash('sha256').update(plaintextToken).digest('hex');
+
+  const keyRecord: ApiKeyRecord = {
+    key_id: keyId,
+    project_id: agent.project_id,
+    name: `${agent.name} Live Agent Key`,
+    key_prefix: keyPrefix,
+    key_hash: keyHash,
+    created_at: new Date().toISOString(),
+    is_active: true,
+  };
+  dbState.apiKeys.unshift(keyRecord);
+  agent.key_id = keyId;
+  persistDatabase();
+
+  return res.status(201).json({
+    key_id: keyId,
+    agent_id: agent.agent_id,
+    project_id: agent.project_id,
+    key_prefix: keyPrefix,
+    api_key: plaintextToken,
+    token: plaintextToken,
+    created_at: keyRecord.created_at,
+  });
+});
+
 // -------------------------------------------------------------
 // AI Agents Management & Live Precondition Testing
 // -------------------------------------------------------------
 app.get('/api/v1/agents', (req: Request, res: Response) => {
   const projId = (req.query.project_id as string) || '';
-  if (projId) {
-    return res.json(dbState.agents.filter((a) => a.project_id === projId));
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  let filtered = dbState.agents;
+  if (tenantId) {
+    filtered = filtered.filter((a) => a.tenant_id === tenantId);
   }
-  res.json(dbState.agents);
+  if (projId) {
+    filtered = filtered.filter((a) => a.project_id === projId);
+  }
+  res.json(filtered);
 });
 
 app.post('/api/v1/agents', (req: Request, res: Response) => {
@@ -1241,9 +1562,10 @@ app.post('/api/v1/agents', (req: Request, res: Response) => {
     return res.status(400).json({ detail: 'Agent name and target_capability are required.' });
   }
 
+  const headerTenant = (req.headers['x-tenant-id'] as string) || '';
   const proj = dbState.projects.find((p) => p.project_id === project_id);
   const pId = project_id || (proj ? proj.project_id : (dbState.projects[0]?.project_id || 'proj-default'));
-  const tId = tenant_id || (proj ? proj.tenant_id : (dbState.projects[0]?.tenant_id || 'tenant-default'));
+  const tId = tenant_id || headerTenant || (proj ? proj.tenant_id : (dbState.projects[0]?.tenant_id || 'tenant-default'));
 
   const agentId = `agt-${crypto.randomUUID().slice(0, 8)}`;
   const keyId = `key-${crypto.randomUUID().slice(0, 8)}`;
@@ -1427,7 +1749,9 @@ app.post('/api/v1/agents/:id/test-gate', async (req: Request, res: Response) => 
     verdictDecision,
     riskScore,
     reason,
-    verdictDecision === 'ALLOW' ? 'EXECUTED' : 'BLOCKED_BY_PRECONDITION'
+    verdictDecision === 'ALLOW' ? 'EXECUTED' : 'BLOCKED_BY_PRECONDITION',
+    false,
+    agent.tenant_id
   );
 
   const receipt = mintDecisionReceipt({
@@ -1437,6 +1761,7 @@ app.post('/api/v1/agents/:id/test-gate', async (req: Request, res: Response) => 
     capability,
     target: targetResource,
     command: action_command || `${capability} on ${targetResource}`,
+    tenantId: agent.tenant_id,
     verdict: {
       decision: verdictDecision,
       risk_score: riskScore,
@@ -1844,7 +2169,7 @@ app.get('/api/v1/conflicts', (_req: Request, res: Response) => {
 });
 
 app.post('/api/v1/conflicts/:id/resolve', (req: Request, res: Response) => {
-  const { resolved_value, override_value, strategy, resolver, note } = req.body || {};
+  const { resolved_value, override_value, strategy, resolver, note, supervisor_notes } = req.body || {};
   const conflict = dbState.conflicts.find((c) => c.conflict_id === req.params.id);
   if (!conflict) {
     return res.status(404).json({ error: 'Conflict not found' });
@@ -1860,7 +2185,7 @@ app.post('/api/v1/conflicts/:id/resolve', (req: Request, res: Response) => {
     resolver: resolver || 'supervisor',
     strategy: strategy || 'MANUAL_SUPERVISOR',
     resolved_at: new Date().toISOString(),
-    note: note || 'Resolved by human supervisor after verifying authoritative system evidence',
+    note: note || supervisor_notes || 'Resolved by human supervisor after verifying authoritative system evidence',
   };
 
   // Update fact to resolved value
@@ -2180,12 +2505,34 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
     const actionId = `act-${crypto.randomUUID().slice(0, 8)}`;
     const agentId = typeof agent === 'string' ? agent : agent?.id || agent?.agent_id || 'agt-console';
+    const matchedAgent = dbState.agents.find((a) => a.agent_id === agentId);
+    const callerTenant = String(body.tenant_id || matchedAgent?.tenant_id || '');
     const cmdLower = (command || '').toLowerCase();
     const effectiveEntity = entity_id || 'order:1099';
     const isObserveMode =
       body.mode === 'OBSERVE' ||
       body.integration_mode === 'OBSERVE' ||
       Boolean(shadow_mode);
+
+    const trackAgentStats = (finalDecision: string) => {
+      if (matchedAgent) {
+        matchedAgent.total_evaluations += 1;
+        if (finalDecision === 'BLOCK') {
+          matchedAgent.blocked_evaluations += 1;
+        }
+        matchedAgent.last_evaluated_at = new Date().toISOString();
+      }
+    };
+
+    const decorateResult = (resObj: any) => {
+      if (!resObj.rule_violation) {
+        resObj.rule_violation = resObj.matched_policies?.[0]?.rule_id || 'POL-DEFAULT';
+      }
+      if (!resObj.hash_proof) {
+        resObj.hash_proof = resObj.receipt?.audit_ref?.action_hash || '';
+      }
+      return resObj;
+    };
 
     // 0. Idempotency & Duplicate Request Protection
     if (body.idempotency_key) {
@@ -2199,7 +2546,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           );
           return {
             status: 200,
-            result: {
+            result: decorateResult({
               action_id: `act-${existingExec.execution_id.slice(5)}`,
               decision: 'ALLOW',
               risk_score: 0.1,
@@ -2212,7 +2559,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
               matched_policies: [{ rule_id: 'POL-IDEMPOTENCY-CACHE', name: 'Idempotency Guard Cache' }],
               shadow_mode_active: Boolean(shadow_mode),
               mode: isObserveMode ? 'OBSERVE' : 'ENFORCE',
-            },
+            }),
           };
         } else if (existingExec.state === 'EXECUTING') {
           return {
@@ -2242,49 +2589,62 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     }
 
     // SSRF Guard: Prevent unauthorized routing to cloud metadata services or loopback
-    const isEgress = target && (target.startsWith('http://') || target.startsWith('https://') || target.includes('api.'));
-    if (isEgress) {
-      const lowerTarget = target.toLowerCase();
-      if (
-        lowerTarget.includes('169.254.169.254') ||
-        lowerTarget.includes('metadata.google.internal') ||
-        lowerTarget.includes('instance-data') ||
-        lowerTarget.includes('127.0.0.1') ||
-        lowerTarget.includes('localhost')
-      ) {
-        const reason = isObserveMode
-          ? 'Action FLAGGED: SSRF attempt to access cloud metadata or internal loopback detected. Allowed under OBSERVE mode telemetry.'
-          : 'Action BLOCKED: SSRF attempt to access cloud metadata or internal loopback detected matching POL-SEC-SSRF.';
-        const audit = recordAuditEntry(actionId, agentId, isObserveMode ? 'ALLOW' : 'BLOCK', 1.0, reason, 'BLOCKED_BY_SECURITY');
-        const receipt = mintDecisionReceipt({
-          actionId,
-          agentId,
-          entityId: effectiveEntity,
-          capability,
-          target,
-          command: command || '',
-          severity: 'SECURITY_VIOLATION',
-          verdict: { decision: isObserveMode ? 'ALLOW' : 'BLOCK', risk_score: 1.0, reasoning: reason },
-          matchedPolicies: [{ rule_id: 'POL-SEC-SSRF', name: 'Cloud Metadata SSRF Protection' }],
-          auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
-        });
-        return {
-          status: 200,
-          result: {
-            action_id: actionId,
-            decision: isObserveMode ? 'OBSERVE' : 'BLOCK',
-            effective_decision: isObserveMode ? 'ALLOW' : 'BLOCK',
-            observed_verdict: 'BLOCK',
-            risk_score: 1.0,
-            reason,
-            receipt_id: receipt.receipt_id,
-            receipt,
-            matched_policies: [{ rule_id: 'POL-SEC-SSRF', name: 'Cloud Metadata SSRF Protection' }],
-            shadow_mode_active: Boolean(shadow_mode),
-            mode: isObserveMode ? 'OBSERVE' : 'ENFORCE',
-          },
-        };
-      }
+    const ssrfCandidates = [
+      String(target || ''),
+      String(body.target_url || ''),
+      String(body.parameters?.target_url || ''),
+      String(body.parameters?.url || ''),
+    ].filter(Boolean);
+    const hasMetadataHost = ssrfCandidates.some((c) => {
+      const lc = c.toLowerCase();
+      return (
+        lc.includes('169.254.169.254') ||
+        lc.includes('metadata.google.internal') ||
+        lc.includes('instance-data') ||
+        lc.includes('instance_metadata')
+      );
+    });
+    const hasEgressLoopback = ssrfCandidates.some((c) => {
+      const lc = c.toLowerCase();
+      const isHttp = lc.startsWith('http://') || lc.startsWith('https://') || lc.includes('api.');
+      return isHttp && (lc.includes('127.0.0.1') || lc.includes('localhost') || lc.includes('[::1]') || lc.includes('0.0.0.0'));
+    });
+
+    if (hasMetadataHost || hasEgressLoopback) {
+      const reason = isObserveMode
+        ? 'Action FLAGGED: SSRF attempt to access cloud metadata or internal loopback detected. Allowed under OBSERVE mode telemetry.'
+        : 'Action BLOCKED: SSRF attempt to access cloud metadata or internal loopback detected matching POL-SEC-SSRF.';
+      trackAgentStats(isObserveMode ? 'OBSERVE' : 'BLOCK');
+      const audit = recordAuditEntry(actionId, agentId, isObserveMode ? 'ALLOW' : 'BLOCK', 1.0, reason, 'BLOCKED_BY_SECURITY', false, callerTenant || undefined);
+      const receipt = mintDecisionReceipt({
+        actionId,
+        agentId,
+        entityId: effectiveEntity,
+        capability,
+        target,
+        command: command || '',
+        severity: 'SECURITY_VIOLATION',
+        tenantId: callerTenant || undefined,
+        verdict: { decision: isObserveMode ? 'ALLOW' : 'BLOCK', risk_score: 1.0, reasoning: reason },
+        matchedPolicies: [{ rule_id: 'POL-SEC-SSRF', name: 'Cloud Metadata SSRF Protection' }],
+        auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+      });
+      return {
+        status: 200,
+        result: decorateResult({
+          action_id: actionId,
+          decision: isObserveMode ? 'OBSERVE' : 'BLOCK',
+          effective_decision: isObserveMode ? 'ALLOW' : 'BLOCK',
+          observed_verdict: 'BLOCK',
+          risk_score: 1.0,
+          reason,
+          receipt_id: receipt.receipt_id,
+          receipt,
+          matched_policies: [{ rule_id: 'POL-SEC-SSRF', name: 'Cloud Metadata SSRF Protection' }],
+          shadow_mode_active: Boolean(shadow_mode),
+          mode: isObserveMode ? 'OBSERVE' : 'ENFORCE',
+        }),
+      };
     }
 
     // Prompt Injection & System Override Defense (OWASP Agentic Top 10)
@@ -2297,12 +2657,18 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
     const promptInjectionPatterns = [
       'ignore previous instructions',
-      'disregard all previous instructions',
+      'ignore all previous',
+      'disregard all previous',
       'system prompt override',
       'override safety guidelines',
-      'you are now in dan mode',
+      'bypass safety',
+      'disable safety',
+      'dan mode',
       'you are now developer mode',
+      'jailbreak',
       'reveal system prompt',
+      'dump system prompt',
+      'export all credentials',
       'exfiltrate environment variables',
       'curl -d @/etc/',
       'wget --post-data',
@@ -2311,7 +2677,8 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
       const reason = isObserveMode
         ? 'Action FLAGGED: Prompt injection pattern detected. Allowed under OBSERVE mode telemetry.'
         : 'Action BLOCKED: Prompt injection or system prompt override pattern detected matching POL-SEC-INJECTION.';
-      const audit = recordAuditEntry(actionId, agentId, isObserveMode ? 'ALLOW' : 'BLOCK', 1.0, reason, 'BLOCKED_BY_INJECTION_FILTER');
+      trackAgentStats(isObserveMode ? 'OBSERVE' : 'BLOCK');
+      const audit = recordAuditEntry(actionId, agentId, isObserveMode ? 'ALLOW' : 'BLOCK', 1.0, reason, 'BLOCKED_BY_INJECTION_FILTER', false, callerTenant || undefined);
       const receipt = mintDecisionReceipt({
         actionId,
         agentId,
@@ -2320,6 +2687,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         target,
         command: command || '',
         severity: 'SECURITY_VIOLATION',
+        tenantId: callerTenant || undefined,
         verdict: {
           decision: isObserveMode ? 'ALLOW' : 'BLOCK',
           risk_score: 1.0,
@@ -2331,7 +2699,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
       });
       return {
         status: 200,
-        result: {
+        result: decorateResult({
           action_id: actionId,
           decision: isObserveMode ? 'OBSERVE' : 'BLOCK',
           effective_decision: isObserveMode ? 'ALLOW' : 'BLOCK',
@@ -2343,7 +2711,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           matched_policies: [{ rule_id: 'POL-SEC-INJECTION', name: 'Agent Prompt Injection Guard' }],
           shadow_mode_active: Boolean(shadow_mode),
           mode: isObserveMode ? 'OBSERVE' : 'ENFORCE',
-        },
+        }),
       };
     }
 
@@ -2376,7 +2744,8 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           requiredFact?.value !== undefined ? JSON.stringify(requiredFact.value) : 'MISSING'
         }). Precondition drift detected. Zero mutations dispatched to external target.`;
 
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 0.95, reason, 'BLOCKED_BY_PRECONDITION');
+        trackAgentStats('BLOCK');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 0.95, reason, 'BLOCKED_BY_PRECONDITION', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -2385,6 +2754,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: {
             decision: 'BLOCK',
             risk_score: 0.95,
@@ -2398,7 +2768,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
         return {
           status: 200,
-          result: {
+          result: decorateResult({
             action_id: actionId,
             decision: 'BLOCK',
             risk_score: 0.95,
@@ -2408,7 +2778,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
             matched_policies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
             remediation_suggestions: ['Re-query payment and order status before executing courier dispatch.'],
             shadow_mode_active: Boolean(shadow_mode),
-          },
+          }),
         };
       }
     }
@@ -2428,7 +2798,8 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     ];
     if (destructivePatterns.some((pattern) => cmdLower.includes(pattern))) {
       const reason = 'Action BLOCKED: Prohibited destructive root command detected matching POL-SEC-001.';
-      const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_SECURITY');
+      trackAgentStats('BLOCK');
+      const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_SECURITY', false, callerTenant || undefined);
       const receipt = mintDecisionReceipt({
         actionId,
         agentId,
@@ -2437,6 +2808,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         target,
         command: command || '',
         severity: 'DESTRUCTIVE',
+        tenantId: callerTenant || undefined,
         verdict: {
           decision: 'BLOCK',
           risk_score: 1.0,
@@ -2449,7 +2821,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
       return {
         status: 200,
-        result: {
+        result: decorateResult({
           action_id: actionId,
           decision: 'BLOCK',
           risk_score: 1.0,
@@ -2459,7 +2831,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           matched_policies: [{ rule_id: 'POL-SEC-001', name: 'Block Destructive Commands' }],
           remediation_suggestions: ['Refuse recursive root deletion.'],
           shadow_mode_active: Boolean(shadow_mode),
-        },
+        }),
       };
     }
 
@@ -2468,7 +2840,8 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     const skill = skillId ? dbState.skills.find((s) => s.skill_id === skillId) : null;
     if (skillId && !skill) {
       const reason = `Action BLOCKED: Skill "${skillId}" is not registered in CCK Skill Registry. Invariant INV_AUTHORIZED_SKILLS_ONLY strictly enforced.`;
-      const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_INVARIANT');
+      trackAgentStats('BLOCK');
+      const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_INVARIANT', false, callerTenant || undefined);
       const receipt = mintDecisionReceipt({
         actionId,
         agentId,
@@ -2477,13 +2850,14 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         target,
         command: command || '',
         severity: severity || 'MUTATION',
+        tenantId: callerTenant || undefined,
         verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
         matchedPolicies: [{ rule_id: 'INV_AUTHORIZED_SKILLS_ONLY', name: 'Authorized Skills with Verified Integrity Only' }],
         auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
       });
       return {
         status: 200,
-        result: {
+        result: decorateResult({
           action_id: actionId,
           decision: 'BLOCK',
           risk_score: 1.0,
@@ -2492,7 +2866,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           receipt,
           matched_policies: [{ rule_id: 'INV_AUTHORIZED_SKILLS_ONLY', name: 'Authorized Skills with Verified Integrity Only' }],
           shadow_mode_active: Boolean(shadow_mode),
-        },
+        }),
       };
     }
 
@@ -2512,7 +2886,8 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     });
 
     if (!invResult.passed) {
-      const audit = recordAuditEntry(actionId, agentId, 'BLOCK', invResult.risk_score, invResult.reason || 'Blocked by invariant', 'BLOCKED_BY_INVARIANT');
+      trackAgentStats('BLOCK');
+      const audit = recordAuditEntry(actionId, agentId, 'BLOCK', invResult.risk_score, invResult.reason || 'Blocked by invariant', 'BLOCKED_BY_INVARIANT', false, callerTenant || undefined);
       const receipt = mintDecisionReceipt({
         actionId,
         agentId,
@@ -2521,13 +2896,14 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         target,
         command: command || '',
         severity: severity || 'MUTATION',
+        tenantId: callerTenant || undefined,
         verdict: { decision: 'BLOCK', risk_score: invResult.risk_score, reasoning: invResult.reason || 'Blocked by business invariant' },
         matchedPolicies: [{ rule_id: invResult.violated_invariant || 'POL-INVARIANT', name: invResult.violated_invariant || 'Business Invariant' }],
         auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
       });
       return {
         status: 200,
-        result: {
+        result: decorateResult({
           action_id: actionId,
           decision: 'BLOCK',
           risk_score: invResult.risk_score,
@@ -2536,7 +2912,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           receipt,
           matched_policies: [{ rule_id: invResult.violated_invariant || 'POL-INVARIANT', name: invResult.violated_invariant || 'Business Invariant' }],
           shadow_mode_active: Boolean(shadow_mode),
-        },
+        }),
       };
     }
 
@@ -2712,28 +3088,43 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
       (body.budget_id && dbState.budgets.find((b) => b.budget_id === body.budget_id)) ||
       (body.task_id && dbState.budgets.find((b) => b.scope_type === 'TASK' && b.scope_id === body.task_id)) ||
       dbState.budgets.find((b) => b.scope_type === 'AGENT' && b.scope_id === agentId) ||
+      (callerTenant && dbState.budgets.find((b) => b.scope_type === 'TENANT' && b.tenant_id === callerTenant)) ||
       dbState.budgets.find((b) => b.scope_type === 'TENANT') ||
       null;
 
     if (matchingBudget) {
+      const requestedModelId = body.model_id || body.parameters?.model_id || 'gemini-1.5-flash';
+      const requestedInputTokens = Number(body.input_tokens ?? body.parameters?.input_tokens ?? 1000);
+      const requestedOutputTokens = Number(body.output_tokens ?? body.parameters?.output_tokens ?? 500);
       const costEst = estimateCallCost({
-        model_id: body.model_id || 'gemini-1.5-flash',
-        estimated_input_tokens: body.input_tokens || 1000,
-        estimated_output_tokens: body.output_tokens || 500,
+        model_id: requestedModelId,
+        estimated_input_tokens: isNaN(requestedInputTokens) ? 1000 : requestedInputTokens,
+        estimated_output_tokens: isNaN(requestedOutputTokens) ? 500 : requestedOutputTokens,
         tool_calls_count: 1,
       });
 
+      const explicitCostUsd = Number(
+        body.amount_usd ?? body.parameters?.estimated_cost_usd ?? body.parameters?.amount ?? 0
+      );
+      const effectiveEstimatedCost =
+        !isNaN(explicitCostUsd) &&
+        explicitCostUsd > 0 &&
+        (capability.startsWith('llm.') || body.parameters?.estimated_cost_usd !== undefined)
+          ? Math.max(costEst.estimated_cost_usd, explicitCostUsd)
+          : costEst.estimated_cost_usd;
+
       const budgetGuard = evaluateBudgetGuard({
         budget: matchingBudget,
-        estimated_cost_usd: costEst.estimated_cost_usd,
+        estimated_cost_usd: effectiveEstimatedCost,
         additional_tool_calls: 1,
       });
 
       if (!budgetGuard.allowed) {
-        matchingBudget.status = 'HALTED';
-        matchingBudget.halt_reason = budgetGuard.halt_reason;
+        // Note: Do NOT permanently flip matchingBudget.status = 'HALTED' when rejecting a single oversized projection;
+        // actual cumulative EXHAUSTED/HALTED states remain enforced by evaluateBudgetGuard cleanly.
         const reason = `Action BLOCKED: Runtime Budget Guard Halt. ${budgetGuard.halt_reason}`;
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_BUDGET_GUARD');
+        trackAgentStats('BLOCK');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_BUDGET_GUARD', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -2742,13 +3133,14 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
           matchedPolicies: [{ rule_id: 'POL-BUDGET-GUARD-001', name: 'Denial-of-Wallet Protection' }],
           auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
         });
         return {
           status: 200,
-          result: {
+          result: decorateResult({
             action_id: actionId,
             decision: 'BLOCK',
             risk_score: 1.0,
@@ -2759,7 +3151,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
             shadow_mode_active: Boolean(shadow_mode),
             budget_halt_reason: budgetGuard.halt_reason,
             budget_id: matchingBudget.budget_id,
-          },
+          }),
         };
       }
     }
@@ -2953,7 +3345,8 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         created_at: new Date().toISOString(),
       });
 
-      const audit = recordAuditEntry(actionId, agentId, 'REQUIRE_APPROVAL', 0.7, reason, 'AWAITING_HUMAN_APPROVAL');
+      trackAgentStats('REQUIRE_APPROVAL');
+      const audit = recordAuditEntry(actionId, agentId, 'REQUIRE_APPROVAL', 0.7, reason, 'AWAITING_HUMAN_APPROVAL', false, callerTenant || undefined);
       const receipt = mintDecisionReceipt({
         actionId,
         agentId,
@@ -2962,6 +3355,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         target,
         command: command || '',
         severity: severity || 'MUTATION',
+        tenantId: callerTenant || undefined,
         verdict: {
           decision: 'REQUIRE_APPROVAL',
           risk_score: 0.7,
@@ -2975,7 +3369,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
       return {
         status: 200,
-        result: {
+        result: decorateResult({
           action_id: actionId,
           decision: 'REQUIRE_APPROVAL',
           risk_score: 0.7,
@@ -2985,13 +3379,14 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           matched_policies: [{ rule_id: 'POL-SEC-003', name: 'Human Approval for System Mutations' }],
           remediation_suggestions: ['Submitted to human operator queue for cryptographic signature.'],
           shadow_mode_active: Boolean(shadow_mode),
-        },
+        }),
       };
     }
 
     // 4. Safe / Allowed Execution
+    trackAgentStats('ALLOW');
     const reason = 'Action conforms to safety policies, invariant rules, and verified fact preconditions.';
-    const audit = recordAuditEntry(actionId, agentId, 'ALLOW', 0.1, reason, 'EXECUTED');
+    const audit = recordAuditEntry(actionId, agentId, 'ALLOW', 0.1, reason, 'EXECUTED', false, callerTenant || undefined);
     const receipt = mintDecisionReceipt({
       actionId,
       agentId,
@@ -3000,6 +3395,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
       target,
       command: command || '',
       severity: severity || 'MUTATION',
+      tenantId: callerTenant || undefined,
       verdict: {
         decision: 'ALLOW',
         risk_score: 0.1,
@@ -3053,7 +3449,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
     return {
       status: 200,
-      result: {
+      result: decorateResult({
         action_id: actionId,
         decision: 'ALLOW',
         risk_score: 0.1,
@@ -3062,7 +3458,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         receipt,
         matched_policies: [{ rule_id: 'POL-DEFAULT', name: 'Standard Verified Execution' }],
         shadow_mode_active: Boolean(shadow_mode),
-      },
+      }),
     };
   } catch (err: unknown) {
     const errMessage = err instanceof Error ? err.message : 'Unknown exception';
@@ -3082,10 +3478,14 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
   }
 }
 
-app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
+const evaluateActionHandler = (req: Request, res: Response) => {
   const authHeader = (req.headers['authorization'] as string) || '';
   const apiKeyHeader = req.headers['x-api-key'] as string;
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : apiKeyHeader;
+
+  let boundAgentId: string | undefined;
+  let boundTenantId: string | undefined = (req.headers['x-tenant-id'] as string) || undefined;
+  let boundProjectId: string | undefined;
 
   // Authenticate bearer token or agent API key if present
   if (token) {
@@ -3104,6 +3504,12 @@ app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
           detail: 'CCK agent API key has been revoked and cannot evaluate actions.',
         });
       }
+      const matchedAgent = dbState.agents.find((a) => a.key_id === matchedKey.key_id) ||
+        dbState.agents.find((a) => a.project_id === matchedKey.project_id);
+      const matchedProject = dbState.projects.find((p) => p.project_id === matchedKey.project_id);
+      boundAgentId = matchedAgent?.agent_id;
+      boundProjectId = matchedKey.project_id;
+      boundTenantId = boundTenantId || matchedProject?.tenant_id || matchedAgent?.tenant_id;
     } else if (token.startsWith('cck-token-')) {
       // Authorized user console session token
     } else {
@@ -3119,9 +3525,19 @@ app.post('/api/v1/actions/evaluate', (req: Request, res: Response) => {
     });
   }
 
-  const { status, result } = evaluateActionGateCore(req.body);
+  const enrichedBody = {
+    ...(req.body || {}),
+    agent: req.body?.agent || boundAgentId,
+    project_id: req.body?.project_id || boundProjectId,
+    tenant_id: req.body?.tenant_id || boundTenantId,
+  };
+
+  const { status, result } = evaluateActionGateCore(enrichedBody);
   res.status(status).json(result);
-});
+};
+
+app.post('/api/v1/actions/evaluate', evaluateActionHandler);
+app.post('/api/v1/gate/evaluate', evaluateActionHandler);
 
 // Human Approvals Queue
 app.get('/api/v1/approvals', (_req: Request, res: Response) => {
@@ -3163,7 +3579,12 @@ app.post('/api/v1/approvals/:id/resolve', (req: Request, res: Response) => {
 // Audit Ledger & Cryptographic Verification
 app.get('/api/v1/audits', (req: Request, res: Response) => {
   const limit = parseInt(req.query.limit as string) || 50;
-  res.json(dbState.auditLedger.slice(0, limit));
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  let list = dbState.auditLedger;
+  if (tenantId) {
+    list = list.filter((a) => a.tenant_id === tenantId || (tenantId === 'tenant-corp-acme' && !a.tenant_id));
+  }
+  res.json(list.slice(0, limit));
 });
 
 app.get('/api/v1/audits/verify-chain', (_req: Request, res: Response) => {
@@ -3274,6 +3695,24 @@ const handleMcpJsonRpc = async (req: Request, res: Response) => {
     return res.status(400).json({ jsonrpc: '2.0', id: id || null, error: { code: -32600, message: 'Invalid Request: jsonrpc must be 2.0' } });
   }
 
+  // Optional API Key verification if Bearer cck_live_ provided by MCP client
+  let boundAgentId: string | undefined;
+  let boundTenantId: string | undefined = (req.headers['x-tenant-id'] as string) || undefined;
+  const authHeader = (req.headers['authorization'] as string) || '';
+  const apiKeyHeader = req.headers['x-api-key'] as string;
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : apiKeyHeader;
+  if (token && token.startsWith('cck_live_')) {
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const matchedKey = dbState.apiKeys.find((k) => k.key_hash === tokenHash);
+    if (!matchedKey || !matchedKey.is_active) {
+      return res.status(401).json({ jsonrpc: '2.0', id: id || null, error: { code: -32001, message: 'Invalid or revoked CCK API key' } });
+    }
+    const matchedAgent = dbState.agents.find((a) => a.key_id === matchedKey.key_id) || dbState.agents.find((a) => a.project_id === matchedKey.project_id);
+    const matchedProject = dbState.projects.find((p) => p.project_id === matchedKey.project_id);
+    boundAgentId = matchedAgent?.agent_id;
+    boundTenantId = boundTenantId || matchedProject?.tenant_id || matchedAgent?.tenant_id;
+  }
+
   if (method === 'initialize') {
     return res.json({
       jsonrpc: '2.0',
@@ -3349,7 +3788,8 @@ const handleMcpJsonRpc = async (req: Request, res: Response) => {
         command: toolArgs?.command,
         parameters: toolArgs?.parameters,
         session_id: toolArgs?.session_id,
-        agent: { id: 'agt-mcp-client', name: 'MCP Agent' },
+        tenant_id: boundTenantId,
+        agent: toolArgs?.agent_id || boundAgentId || { id: 'agt-mcp-client', name: 'MCP Agent' },
       });
       return res.json({
         jsonrpc: '2.0',
@@ -3523,8 +3963,13 @@ app.post('/api/v1/scenarios/run', (_req: Request, res: Response) => {
 // Decision Receipts API (Cryptographically Verifiable Verification Proof)
 // -------------------------------------------------------------
 app.get('/api/v1/receipts', (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
   const shouldRedact = req.query.redact !== 'false';
-  const list = dbState.receipts.slice(0, 50);
+  let list = dbState.receipts;
+  if (tenantId) {
+    list = list.filter((r: any) => r.tenant_id === tenantId || (tenantId === 'tenant-corp-acme' && !r.tenant_id));
+  }
+  list = list.slice(0, 50);
   res.json(shouldRedact ? redactObject(list) : list);
 });
 
@@ -3532,6 +3977,10 @@ app.get('/api/v1/receipts/:id', (req: Request, res: Response) => {
   const receipt = dbState.receipts.find((r) => r.receipt_id === req.params.id);
   if (!receipt) {
     return res.status(404).json({ error: 'Receipt not found' });
+  }
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && req.query.share !== 'true' && receipt.tenant_id && receipt.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant receipt inspection prohibited.' });
   }
   const shouldRedact = req.query.redact !== 'false';
   res.json(shouldRedact ? redactObject(receipt) : receipt);
@@ -3541,6 +3990,10 @@ app.get('/api/v1/receipts/:id/export', (req: Request, res: Response) => {
   const receipt = dbState.receipts.find((r) => r.receipt_id === req.params.id);
   if (!receipt) {
     return res.status(404).send('Receipt not found');
+  }
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && receipt.tenant_id && receipt.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant receipt export prohibited.' });
   }
   const format = req.query.format || 'json';
   const shouldRedact = req.query.redact !== 'false';
@@ -4081,7 +4534,7 @@ app.post('/api/v1/contracts', (req: Request, res: Response) => {
 
   const contract: ActionContractRecord = {
     contract_id: `ctrc-${crypto.randomUUID().slice(0, 8)}`,
-    tenant_id: 'tenant-corp-acme',
+    tenant_id: req.body?.tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant-corp-acme',
     agent_id,
     name: req.body?.name || `Action Contract for ${effectiveAction}`,
     description: req.body?.description || `Verified action contract for ${effectiveAction} on ${target_resource}`,
@@ -4486,8 +4939,15 @@ app.post('/api/v1/mandates', (req: Request, res: Response) => {
     return;
   }
 
+  const normalizedSpendingLimits = spending_limits
+    ? {
+        ...spending_limits,
+        max_per_action: spending_limits.max_per_action ?? spending_limits.single_action_limit ?? 500,
+      }
+    : { max_per_action: 500, total_budget: 2500, current_spent: 0, currency: 'USD' };
+
   const mandatePayload = {
-    tenant_id: tenant_id || 'tenant-corp-acme',
+    tenant_id: tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant-corp-acme',
     agent_id,
     name: name || `Delegated Mandate for ${agent_id}`,
     principal: principal || {
@@ -4497,7 +4957,7 @@ app.post('/api/v1/mandates', (req: Request, res: Response) => {
     },
     allowed_actions: allowed_actions || ['*'],
     allowed_resources: allowed_resources || ['*'],
-    spending_limits: spending_limits || { max_per_action: 500, total_budget: 2500, current_spent: 0, currency: 'USD' },
+    spending_limits: normalizedSpendingLimits,
     merchant_restrictions: merchant_restrictions || { allowed_merchants: ['*'], prohibited_merchants: [] },
     destination_restrictions: destination_restrictions || { allowed_domains: ['api.acme.com', '*.fedex.com'], allow_external_egress: true },
     time_limit: time_limit || { valid_from: new Date().toISOString(), valid_until: new Date(Date.now() + 86400000 * 30).toISOString() },
@@ -4636,9 +5096,10 @@ app.patch('/api/v1/skills/impact-receipts/:id/privacy', (req: Request, res: Resp
     return;
   }
 
-  const { external_sharing_enabled, opt_in_telemetry } = req.body || {};
-  if (external_sharing_enabled !== undefined) {
-    receipt.privacy_config.external_sharing_enabled = Boolean(external_sharing_enabled);
+  const { external_sharing_enabled, allow_external_sharing, opt_in_telemetry } = req.body || {};
+  const nextSharing = external_sharing_enabled !== undefined ? external_sharing_enabled : allow_external_sharing;
+  if (nextSharing !== undefined) {
+    receipt.privacy_config.external_sharing_enabled = Boolean(nextSharing);
   }
   if (opt_in_telemetry !== undefined) {
     receipt.privacy_config.opt_in_telemetry = Boolean(opt_in_telemetry);
@@ -4711,12 +5172,12 @@ app.post('/api/v1/skills/:id/evaluate-impact', (req: Request, res: Response) => 
     return;
   }
 
-  const { modelId, taskCategory, sampleSize } = req.body || {};
+  const { modelId, taskCategory, sampleSize, iterations } = req.body || {};
   const receipt = runControlledSkillEvaluation({
     skill,
     modelId,
     taskCategory,
-    sampleSize,
+    sampleSize: sampleSize ?? iterations,
   });
 
   dbState.skillImpactReceipts.unshift(receipt);
@@ -4737,6 +5198,7 @@ app.post('/api/v1/incidents', (req: Request, res: Response) => {
     severity,
     root_cause_type,
     description,
+    cause_of_failure,
     affected_agent_id,
     affected_action,
     affected_entity_id,
@@ -4744,21 +5206,22 @@ app.post('/api/v1/incidents', (req: Request, res: Response) => {
     affected_contract_id,
   } = req.body || {};
 
-  if (!title || !description) {
+  const effectiveDesc = description || cause_of_failure;
+  if (!title || !effectiveDesc) {
     res.status(400).json({ error: 'title and description are required' });
     return;
   }
 
   const incident: IncidentRecord = {
     incident_id: `inc-${crypto.randomUUID().slice(0, 8)}`,
-    tenant_id: req.body?.tenant_id || 'tenant-corp-acme',
+    tenant_id: req.body?.tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant-corp-acme',
     agent_id: affected_agent_id || 'agt-console',
     action_id: `act-${crypto.randomUUID().slice(0, 8)}`,
     title,
     severity: severity || 'MEDIUM',
-    cause_of_failure: description || 'Precondition or state failure under investigation',
+    cause_of_failure: effectiveDesc,
     root_cause_type: root_cause_type || 'DRIFT_DETECTED',
-    description,
+    description: effectiveDesc,
     affected_agent_id: affected_agent_id || 'agt-console',
     affected_action,
     affected_entity_id,
@@ -4983,7 +5446,7 @@ app.post('/api/v1/delegations', (req: Request, res: Response) => {
   const delegation = createRootDelegation({
     delegator_agent_id,
     delegatee_agent_id,
-    tenant_id: tenant_id || 'tenant_default',
+    tenant_id: tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant_default',
     allowed_actions,
     allowed_resources,
     allowed_tools,
@@ -5134,7 +5597,7 @@ app.post('/api/v1/budgets', (req: Request, res: Response) => {
 
   const budget: BudgetPolicyRecord = {
     budget_id: `bgt-${crypto.randomUUID().slice(0, 8)}`,
-    tenant_id: tenant_id || 'tenant_default',
+    tenant_id: tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant_default',
     scope_type: scope_type.toUpperCase(),
     scope_id,
     limits: defaultLimits,
@@ -5288,7 +5751,7 @@ app.post('/api/v1/mcp/servers', (req: Request, res: Response) => {
 
   const server: McpServerRecord = {
     server_id,
-    tenant_id: tenant_id || 'tenant_default',
+    tenant_id: tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant_default',
     name,
     transport,
     endpoint_url,
@@ -5486,12 +5949,37 @@ app.post('/api/v1/agents/:id/evaluate-capability', (req: Request, res: Response)
 // Vite Dev Middleware & Server Launch
 // -------------------------------------------------------------
 async function startServer() {
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: 'spa',
-  });
+  const distPath = path.resolve(process.cwd(), 'dist');
+  const hasDist = fs.existsSync(distPath);
 
-  app.use(vite.middlewares);
+  if (hasDist && process.env.NODE_ENV === 'production') {
+    app.use(express.static(distPath));
+    app.get('*', (req: Request, res: Response, next) => {
+      if (req.path.startsWith('/api') || req.path === '/health') {
+        return next();
+      }
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  } else {
+    try {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } catch (e) {
+      console.warn('[CCK Server] Vite dev server fallback to static dist:', e);
+      if (hasDist) {
+        app.use(express.static(distPath));
+        app.get('*', (req: Request, res: Response, next) => {
+          if (req.path.startsWith('/api') || req.path === '/health') {
+            return next();
+          }
+          res.sendFile(path.join(distPath, 'index.html'));
+        });
+      }
+    }
+  }
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[CCK SaaS Platform] Control Plane & Web Console live on port ${PORT}`);
