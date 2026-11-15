@@ -57,6 +57,9 @@ import {
   GitMerge,
   Wallet,
   FileCheck2,
+  OctagonAlert,
+  GitCompare,
+  Award,
 } from 'lucide-react';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import {
@@ -82,6 +85,10 @@ import { BudgetGuardView } from './components/governance/BudgetGuardView';
 import { McpGovernanceView } from './components/governance/McpGovernanceView';
 import { CapabilityEvidenceView } from './components/governance/CapabilityEvidenceView';
 import { AgentPlaygroundModal } from './components/AgentPlaygroundModal';
+import { PreflightSimulatorView } from './components/unicorn/PreflightSimulatorView';
+import { KillSwitchBreakerView } from './components/unicorn/KillSwitchBreakerView';
+import { PolicyStudioCiView } from './components/unicorn/PolicyStudioCiView';
+import { TrustVerifierView } from './components/unicorn/TrustVerifierView';
 import type {
   ActionContractRecord,
   ContractExecutionRecord,
@@ -331,7 +338,11 @@ type NavSection =
   | 'approvals'
   | 'audit'
   | 'scenarios'
-  | 'diagnostics';
+  | 'diagnostics'
+  | 'simulator'
+  | 'killswitch'
+  | 'policystudio'
+  | 'trustverifier';
 
 export default function App() {
   // Navigation & Viewport State
@@ -358,6 +369,7 @@ export default function App() {
   const [budgets, setBudgets] = useState<BudgetPolicyRecord[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([]);
   const [capabilityEvidence, setCapabilityEvidence] = useState<CapabilityEvidenceReceiptRecord[]>([]);
+  const [activeKillSwitchesCount, setActiveKillSwitchesCount] = useState<number>(0);
 
   // Backend Health & System Status
   const [isBackendLive, setIsBackendLive] = useState<boolean>(false);
@@ -786,6 +798,7 @@ export default function App() {
         budgetsRes,
         mcpServersRes,
         capabilityRes,
+        killSwitchesRes,
       ] = await Promise.all([
         authFetch('/api/v1/contracts').catch(() => null),
         authFetch('/api/v1/contracts/executions').catch(() => null),
@@ -803,6 +816,7 @@ export default function App() {
         authFetch('/api/v1/budgets').catch(() => null),
         authFetch('/api/v1/mcp/servers').catch(() => null),
         authFetch('/api/v1/capability-evidence').catch(() => null),
+        authFetch('/api/v1/kill-switches').catch(() => null),
       ]);
 
       if (contractsRes?.ok) setContracts(await contractsRes.json());
@@ -821,6 +835,12 @@ export default function App() {
       if (budgetsRes?.ok) setBudgets(await budgetsRes.json());
       if (mcpServersRes?.ok) setMcpServers(await mcpServersRes.json());
       if (capabilityRes?.ok) setCapabilityEvidence(await capabilityRes.json());
+      if (killSwitchesRes?.ok) {
+        const ksList = await killSwitchesRes.json();
+        setActiveKillSwitchesCount(
+          Array.isArray(ksList) ? ksList.filter((k: { status?: string }) => k.status === 'ACTIVE').length : 0
+        );
+      }
     } catch (err) {
       console.warn('Failed to fetch assurance data', err);
     }
@@ -1781,6 +1801,10 @@ export default function App() {
 
   const navItems = [
     { id: 'overview' as NavSection, label: 'Platform Overview', icon: Activity },
+    { id: 'simulator' as NavSection, label: 'Pre-Flight Simulator', icon: GitCompare },
+    { id: 'killswitch' as NavSection, label: 'Kill Switch & Breakers', icon: OctagonAlert, badge: activeKillSwitchesCount || undefined },
+    { id: 'policystudio' as NavSection, label: 'Policy Studio & CI Gate', icon: Shield },
+    { id: 'trustverifier' as NavSection, label: 'Proof Verifier & Passport', icon: Award },
     { id: 'delegations' as NavSection, label: 'Multi-Hop Delegations', icon: GitMerge, badge: delegations.filter((d) => !d.revoked).length },
     { id: 'budgets' as NavSection, label: 'Runtime Budget Guard', icon: Wallet, badge: budgets.length },
     { id: 'mcp_governance' as NavSection, label: 'MCP Server Governance', icon: Server, badge: mcpServers.filter((s) => s.lifecycle_status === 'REVIEW_REQUIRED').length || undefined },
@@ -2527,6 +2551,86 @@ export default function App() {
                       )}
                     </tbody>
                   </table>
+                </div>
+              </div>
+
+              {/* Autonomous Defense & Verification Modules */}
+              <div className={`rounded-2xl border p-5 ${bgCard}`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
+                  <div>
+                    <h3 className="font-bold text-sm flex items-center space-x-2">
+                      <Zap className="w-4 h-4 text-cyan-400" />
+                      <span>Autonomous Defense, Policy Firewall & Cryptographic Assurance</span>
+                    </h3>
+                    <p className={`text-xs ${textMuted} mt-0.5`}>
+                      Launch counterfactual blast-radius simulations, emergency freezes, CI release gates, and signed Trust Passports.
+                    </p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 text-xs">
+                  <button
+                    onClick={() => setActiveSection('simulator')}
+                    className={`text-left p-3.5 rounded-xl border transition-colors ${bgSubtle} ${borderSubtle} hover:border-cyan-500/50`}
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-semibold text-cyan-400 flex items-center gap-1.5">
+                        <GitCompare className="w-4 h-4" />
+                        <span>Pre-Flight Simulator</span>
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+                    </div>
+                    <p className={textMuted}>
+                      Test What-If spend limits, blocklists, and drift against historical receipts before production deploy.
+                    </p>
+                  </button>
+
+                  <button
+                    onClick={() => setActiveSection('killswitch')}
+                    className={`text-left p-3.5 rounded-xl border transition-colors ${bgSubtle} ${borderSubtle} hover:border-rose-500/50`}
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-semibold text-rose-400 flex items-center gap-1.5">
+                        <OctagonAlert className="w-4 h-4" />
+                        <span>Kill Switch & Breakers</span>
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+                    </div>
+                    <p className={textMuted}>
+                      Instant tenant/agent freeze, autonomous circuit breakers, and signed Slack/PagerDuty alert webhooks.
+                    </p>
+                  </button>
+
+                  <button
+                    onClick={() => setActiveSection('policystudio')}
+                    className={`text-left p-3.5 rounded-xl border transition-colors ${bgSubtle} ${borderSubtle} hover:border-indigo-500/50`}
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-semibold text-indigo-400 flex items-center gap-1.5">
+                        <Shield className="w-4 h-4" />
+                        <span>Policy Studio & CI Gate</span>
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+                    </div>
+                    <p className={textMuted}>
+                      Author Enforce/Shadow wildcard firewall rules and enforce pre-deploy CI/CD release gates.
+                    </p>
+                  </button>
+
+                  <button
+                    onClick={() => setActiveSection('trustverifier')}
+                    className={`text-left p-3.5 rounded-xl border transition-colors ${bgSubtle} ${borderSubtle} hover:border-emerald-500/50`}
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-semibold text-emerald-400 flex items-center gap-1.5">
+                        <Award className="w-4 h-4" />
+                        <span>Proof Verifier & Passport</span>
+                      </span>
+                      <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
+                    </div>
+                    <p className={textMuted}>
+                      Verify HMAC receipt proofs with tamper detection and generate embeddable SVG Trust Passports.
+                    </p>
+                  </button>
                 </div>
               </div>
             </div>
@@ -4791,6 +4895,55 @@ if (verdict.decision === 'ALLOW') {
               bgSubtle={bgSubtle}
               textMuted={textMuted}
               borderSubtle={borderSubtle}
+            />
+          )}
+
+          {activeSection === 'simulator' && (
+            <PreflightSimulatorView
+              isDark={isDark}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
+              agents={agents}
+              onNotification={showNotification}
+              onPolicyPromoted={() => {
+                fetchAssuranceData();
+                setActiveSection('policystudio');
+              }}
+            />
+          )}
+
+          {activeSection === 'killswitch' && (
+            <KillSwitchBreakerView
+              isDark={isDark}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
+              agents={agents}
+              onNotification={showNotification}
+              onRefreshAgents={() => {
+                fetchAgents();
+                fetchAssuranceData();
+              }}
+            />
+          )}
+
+          {activeSection === 'policystudio' && (
+            <PolicyStudioCiView
+              isDark={isDark}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
+              agents={agents}
+              onNotification={showNotification}
+            />
+          )}
+
+          {activeSection === 'trustverifier' && (
+            <TrustVerifierView
+              isDark={isDark}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
+              agents={agents}
+              receipts={receipts}
+              onNotification={showNotification}
             />
           )}
         </main>

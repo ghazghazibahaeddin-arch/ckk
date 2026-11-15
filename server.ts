@@ -60,8 +60,28 @@ import {
   mintCapabilityEvidenceReceipt,
 } from './src/governance/governance_engine.ts';
 
+import type {
+  KillSwitchRecord,
+  CircuitBreakerRule,
+  AlertWebhookSubscription,
+  WebhookDeliveryRecord,
+  SimulationRunRecord,
+  CiGateCheckReport,
+} from './src/assurance/unicorn_engine.ts';
+import {
+  signReceiptProof,
+  verifyReceiptProof,
+  matchActiveKillSwitch,
+  evaluateCustomPolicyRules,
+  extractActionAmountUsd,
+  evaluateCounterfactualSimulation,
+  computeAgentTrustPassport,
+  evaluateCiReleaseGate,
+} from './src/assurance/unicorn_engine.ts';
+
 export const app = express();
 const PORT = 3000;
+const CCK_SIGNING_SECRET = process.env.CCK_SIGNING_SECRET || 'cck-platform-hmac-proof-secret-v1';
 
 // Security Headers Middleware (Helmet-equivalent hardening)
 app.use((_req, res, next) => {
@@ -201,13 +221,19 @@ export interface DependencyRecord {
 
 export interface PolicyRule {
   rule_id: string;
+  tenant_id?: string;
   name: string;
   description: string;
   capability_pattern: string;
   target_pattern: string;
   action_effect: 'ALLOW' | 'BLOCK' | 'REQUIRE_APPROVAL';
+  rollout_mode?: 'ENFORCE' | 'SHADOW';
+  max_amount_usd?: number;
+  blocked_keywords?: string[];
   risk_level: string;
   is_active: boolean;
+  is_custom?: boolean;
+  created_at?: string;
 }
 
 export interface PendingApprovalRecord {
@@ -300,6 +326,10 @@ export interface DecisionReceiptRecord {
   redacted: boolean;
   shareable_token: string;
   is_demo?: boolean;
+  proof?: {
+    payload_digest: string;
+    hmac_signature: string;
+  };
 }
 
 export interface AgentRecord {
@@ -365,6 +395,13 @@ interface CCKDatabaseSchema {
   budgets: BudgetPolicyRecord[];
   mcpServers: McpServerRecord[];
   capabilityEvidenceReceipts: CapabilityEvidenceReceiptRecord[];
+  // Unicorn Capabilities: Kill Switches, Circuit Breakers, Simulator, Webhooks, CI Gate
+  killSwitches: KillSwitchRecord[];
+  circuitBreakers: CircuitBreakerRule[];
+  alertWebhooks: AlertWebhookSubscription[];
+  webhookDeliveries: WebhookDeliveryRecord[];
+  simulationRuns: SimulationRunRecord[];
+  ciGateReports: CiGateCheckReport[];
 }
 
 // -------------------------------------------------------------
@@ -399,6 +436,12 @@ let dbState: CCKDatabaseSchema = {
   budgets: [],
   mcpServers: [],
   capabilityEvidenceReceipts: [],
+  killSwitches: [],
+  circuitBreakers: [],
+  alertWebhooks: [],
+  webhookDeliveries: [],
+  simulationRuns: [],
+  ciGateReports: [],
 };
 
 function getInitialCleanDatabase(): CCKDatabaseSchema {
@@ -828,6 +871,27 @@ function getInitialCleanDatabase(): CCKDatabaseSchema {
     budgets: defaultBudgets,
     mcpServers: defaultMcpServers,
     capabilityEvidenceReceipts: defaultCapabilityEvidence,
+    killSwitches: [],
+    circuitBreakers: [
+      {
+        breaker_id: 'brk-default-template',
+        tenant_id: 'tenant_default',
+        name: 'Auto-Freeze Loop & Attack Breaker (Template)',
+        target_scope: 'AGENT',
+        target_id: '*',
+        max_consecutive_blocks: 3,
+        window_seconds: 120,
+        recent_block_timestamps: [],
+        status: 'CLOSED',
+        enabled: false,
+        trip_count: 0,
+        created_at: new Date().toISOString(),
+      },
+    ],
+    alertWebhooks: [],
+    webhookDeliveries: [],
+    simulationRuns: [],
+    ciGateReports: [],
   };
 }
 
@@ -854,6 +918,12 @@ function loadDatabase(): void {
       if (!Array.isArray(dbState.budgets)) dbState.budgets = [];
       if (!Array.isArray(dbState.mcpServers)) dbState.mcpServers = [];
       if (!Array.isArray(dbState.capabilityEvidenceReceipts)) dbState.capabilityEvidenceReceipts = [];
+      if (!Array.isArray(dbState.killSwitches)) dbState.killSwitches = [];
+      if (!Array.isArray(dbState.circuitBreakers)) dbState.circuitBreakers = [];
+      if (!Array.isArray(dbState.alertWebhooks)) dbState.alertWebhooks = [];
+      if (!Array.isArray(dbState.webhookDeliveries)) dbState.webhookDeliveries = [];
+      if (!Array.isArray(dbState.simulationRuns)) dbState.simulationRuns = [];
+      if (!Array.isArray(dbState.ciGateReports)) dbState.ciGateReports = [];
 
       // Seed defaults if empty
       const clean = getInitialCleanDatabase();
@@ -870,6 +940,7 @@ function loadDatabase(): void {
       if (dbState.budgets.length === 0) dbState.budgets = clean.budgets;
       if (dbState.mcpServers.length === 0) dbState.mcpServers = clean.mcpServers;
       if (dbState.capabilityEvidenceReceipts.length === 0) dbState.capabilityEvidenceReceipts = clean.capabilityEvidenceReceipts;
+      if (dbState.circuitBreakers.length === 0) dbState.circuitBreakers = clean.circuitBreakers;
 
       console.log(`[CCK Persistence Engine] Loaded ${dbState.projects.length} projects, ${dbState.agents.length} agents, ${dbState.contracts.length} contracts, ${dbState.delegations.length} delegations, ${dbState.budgets.length} budgets, ${dbState.mcpServers.length} MCP servers from ${DATA_FILE}`);
       return;
@@ -1080,12 +1151,157 @@ export function mintDecisionReceipt(params: {
     is_demo: Boolean(params.isDemo),
   };
 
+  receipt.proof = signReceiptProof(receipt, CCK_SIGNING_SECRET);
+
   dbState.receipts.unshift(receipt);
   if (dbState.receipts.length > 200) {
     dbState.receipts.pop();
   }
   persistDatabase();
   return receipt;
+}
+
+function isSsrfUnsafeUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return true;
+    const h = parsed.hostname.toLowerCase();
+    return (
+      h === 'localhost' ||
+      h === '127.0.0.1' ||
+      h === '0.0.0.0' ||
+      h === '::1' ||
+      h === '[::1]' ||
+      h.startsWith('169.254.') ||
+      h.startsWith('10.') ||
+      h.startsWith('192.168.') ||
+      h.includes('metadata.google.internal') ||
+      h.endsWith('.internal')
+    );
+  } catch {
+    return true;
+  }
+}
+
+function dispatchAlertWebhookEvent(tenantId: string, eventType: string, payload: Record<string, unknown>): void {
+  const subs = (dbState.alertWebhooks || []).filter(
+    (w) => w.is_active && w.tenant_id === tenantId && (w.events.includes('*') || w.events.includes(eventType))
+  );
+  if (subs.length === 0) return;
+
+  const now = new Date().toISOString();
+  for (const sub of subs) {
+    const envelope = { event_type: eventType, tenant_id: tenantId, timestamp: now, data: payload };
+    const canonical = JSON.stringify(envelope);
+    const sig = 'sha256=' + crypto.createHmac('sha256', sub.signing_secret_hash).update(canonical).digest('hex');
+
+    const unsafe = isSsrfUnsafeUrl(sub.target_url);
+    const delivery: WebhookDeliveryRecord = {
+      delivery_id: `dlv-${crypto.randomUUID().slice(0, 8)}`,
+      webhook_id: sub.webhook_id,
+      tenant_id: tenantId,
+      event_type: eventType,
+      signature_header: sig,
+      payload_preview: payload,
+      status: unsafe ? 'BLOCKED_SSRF' : 'SIGNED_LOGGED',
+      delivered_at: now,
+    };
+    dbState.webhookDeliveries.unshift(delivery);
+    sub.last_delivery_at = now;
+
+    if (!unsafe) {
+      fetch(sub.target_url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CCK-Webhook-Signature': sig,
+          'X-CCK-Event': eventType,
+        },
+        body: canonical,
+      })
+        .then((r) => {
+          delivery.status = r.ok ? 'DELIVERED' : 'FAILED';
+          delivery.http_status = r.status;
+          persistDatabase();
+        })
+        .catch(() => {
+          delivery.status = 'SIGNED_LOGGED';
+        });
+    }
+  }
+  if (dbState.webhookDeliveries.length > 100) {
+    dbState.webhookDeliveries = dbState.webhookDeliveries.slice(0, 100);
+  }
+}
+
+function evaluateCircuitBreakerOnVerdict(tenantId: string, agentId: string, decision: string): KillSwitchRecord | null {
+  if (!tenantId) return null;
+  const nowMs = Date.now();
+  const breakers = (dbState.circuitBreakers || []).filter(
+    (b) => b.enabled && b.tenant_id === tenantId && (b.target_id === '*' || b.target_id === agentId)
+  );
+  if (breakers.length === 0) return null;
+
+  let trippedSwitch: KillSwitchRecord | null = null;
+  for (const brk of breakers) {
+    if (decision === 'ALLOW') {
+      brk.recent_block_timestamps = [];
+      continue;
+    }
+    if (decision !== 'BLOCK') continue;
+
+    const cutoffMs = nowMs - brk.window_seconds * 1000;
+    const recent = (brk.recent_block_timestamps || []).filter((ts) => new Date(ts).getTime() >= cutoffMs);
+    recent.push(new Date(nowMs).toISOString());
+    brk.recent_block_timestamps = recent;
+
+    if (recent.length >= brk.max_consecutive_blocks && brk.status !== 'OPEN') {
+      brk.status = 'OPEN';
+      brk.trip_count += 1;
+      brk.last_tripped_at = new Date(nowMs).toISOString();
+
+      const switchId = `ksw-${crypto.randomUUID().slice(0, 8)}`;
+      const newSwitch: KillSwitchRecord = {
+        switch_id: switchId,
+        tenant_id: tenantId,
+        scope_type: brk.target_scope === 'TENANT' ? 'GLOBAL_TENANT' : 'AGENT',
+        scope_value: brk.target_scope === 'TENANT' ? tenantId : agentId,
+        reason: `Circuit Breaker "${brk.name}" auto-tripped after ${recent.length} consecutive BLOCK verdicts within ${brk.window_seconds}s.`,
+        triggered_by: `circuit-breaker:${brk.breaker_id}`,
+        auto_triggered: true,
+        status: 'ACTIVE',
+        triggered_at: new Date(nowMs).toISOString(),
+        blocked_hits_count: 0,
+      };
+      brk.linked_switch_id = switchId;
+      dbState.killSwitches.unshift(newSwitch);
+      trippedSwitch = newSwitch;
+
+      dbState.incidents.unshift({
+        incident_id: `inc-${crypto.randomUUID().slice(0, 8)}`,
+        tenant_id: tenantId,
+        agent_id: agentId,
+        action_id: `act-brk-${brk.breaker_id.slice(-6)}`,
+        title: `Circuit Breaker Auto-Freeze: ${agentId}`,
+        severity: 'CRITICAL',
+        cause_of_failure: newSwitch.reason,
+        affected_entities: [agentId],
+        affected_skills: [],
+        affected_contracts: [],
+        status: 'OPEN',
+        created_at: new Date(nowMs).toISOString(),
+      });
+
+      dispatchAlertWebhookEvent(tenantId, 'CIRCUIT_BREAKER_OPENED', {
+        breaker_id: brk.breaker_id,
+        switch_id: switchId,
+        agent_id: agentId,
+        consecutive_blocks: recent.length,
+        reason: newSwitch.reason,
+      });
+    }
+  }
+  return trippedSwitch;
 }
 
 function persistDatabase(): void {
@@ -2522,6 +2738,17 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         }
         matchedAgent.last_evaluated_at = new Date().toISOString();
       }
+      if (callerTenant) {
+        evaluateCircuitBreakerOnVerdict(callerTenant, agentId, finalDecision);
+        if (finalDecision === 'BLOCK') {
+          dispatchAlertWebhookEvent(callerTenant, 'HIGH_RISK_BLOCK', {
+            action_id: actionId,
+            agent_id: agentId,
+            capability,
+            target,
+          });
+        }
+      }
     };
 
     const decorateResult = (resObj: any) => {
@@ -2533,6 +2760,55 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
       }
       return resObj;
     };
+
+    // -1. Emergency Kill Switch Freeze Check (Highest Priority Zero-Bypass)
+    const activeSwitch = matchActiveKillSwitch({
+      switches: dbState.killSwitches || [],
+      tenantId: callerTenant || 'tenant_default',
+      agentId,
+      capability,
+    });
+    if (activeSwitch) {
+      activeSwitch.blocked_hits_count += 1;
+      const reason = isObserveMode
+        ? `Action FLAGGED: Emergency Kill Switch [${activeSwitch.switch_id}] is ACTIVE (${activeSwitch.scope_type}: ${activeSwitch.scope_value}). Reason: ${activeSwitch.reason}`
+        : `Action BLOCKED: Emergency Kill Switch [${activeSwitch.switch_id}] is ACTIVE (${activeSwitch.scope_type}: ${activeSwitch.scope_value}). ${activeSwitch.reason}`;
+      if (matchedAgent) {
+        matchedAgent.total_evaluations += 1;
+        if (!isObserveMode) matchedAgent.blocked_evaluations += 1;
+        matchedAgent.last_evaluated_at = new Date().toISOString();
+      }
+      const audit = recordAuditEntry(actionId, agentId, isObserveMode ? 'ALLOW' : 'BLOCK', 1.0, reason, 'BLOCKED_BY_KILL_SWITCH', false, callerTenant || undefined);
+      const receipt = mintDecisionReceipt({
+        actionId,
+        agentId,
+        entityId: effectiveEntity,
+        capability,
+        target,
+        command: command || '',
+        severity: 'CRITICAL',
+        tenantId: callerTenant || undefined,
+        verdict: { decision: isObserveMode ? 'ALLOW' : 'BLOCK', risk_score: 1.0, reasoning: reason },
+        matchedPolicies: [{ rule_id: 'POL-KILLSWITCH-ACTIVE', name: `Emergency Kill Switch (${activeSwitch.scope_type})` }],
+        auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+      });
+      return {
+        status: 200,
+        result: decorateResult({
+          action_id: actionId,
+          decision: isObserveMode ? 'OBSERVE' : 'BLOCK',
+          effective_decision: isObserveMode ? 'ALLOW' : 'BLOCK',
+          observed_verdict: 'BLOCK',
+          risk_score: 1.0,
+          reason,
+          kill_switch_id: activeSwitch.switch_id,
+          receipt_id: receipt.receipt_id,
+          receipt,
+          matched_policies: [{ rule_id: 'POL-KILLSWITCH-ACTIVE', name: `Emergency Kill Switch (${activeSwitch.scope_type})` }],
+          shadow_mode_active: Boolean(shadow_mode),
+        }),
+      };
+    }
 
     // 0. Idempotency & Duplicate Request Protection
     if (body.idempotency_key) {
@@ -3383,6 +3659,67 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
       };
     }
 
+    // 3.5 Programmable Custom Policy Firewall Studio Check
+    const customPolicyRes = evaluateCustomPolicyRules({
+      rules: dbState.policies,
+      tenantId: callerTenant || 'tenant_default',
+      capability,
+      target,
+      command: command || '',
+      amountUsd: extractActionAmountUsd({ command, amount_usd: body.amount_usd, parameters: body.parameters }),
+    });
+    if (customPolicyRes.matchedRule && !customPolicyRes.isShadow) {
+      const ruleEffect = customPolicyRes.effect;
+      if (ruleEffect === 'REQUIRE_APPROVAL') {
+        const approvalId = `appr-${crypto.randomUUID().slice(0, 8)}`;
+        dbState.pendingApprovals.unshift({
+          approval_id: approvalId,
+          action_id: actionId,
+          agent_id: agentId,
+          capability,
+          target,
+          command: command || '',
+          reason: customPolicyRes.reason,
+          status: 'PENDING',
+          created_at: new Date().toISOString(),
+        });
+      }
+      trackAgentStats(ruleEffect);
+      const audit = recordAuditEntry(actionId, agentId, ruleEffect, ruleEffect === 'BLOCK' ? 0.95 : 0.65, customPolicyRes.reason, 'BLOCKED_BY_CUSTOM_POLICY', false, callerTenant || undefined);
+      const receipt = mintDecisionReceipt({
+        actionId,
+        agentId,
+        entityId: effectiveEntity,
+        capability,
+        target,
+        command: command || '',
+        severity: severity || 'MUTATION',
+        tenantId: callerTenant || undefined,
+        verdict: {
+          decision: isObserveMode ? 'ALLOW' : ruleEffect,
+          risk_score: ruleEffect === 'BLOCK' ? 0.95 : 0.65,
+          reasoning: customPolicyRes.reason,
+        },
+        matchedPolicies: [{ rule_id: customPolicyRes.matchedRule.rule_id, name: customPolicyRes.matchedRule.name }],
+        auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+      });
+      return {
+        status: 200,
+        result: decorateResult({
+          action_id: actionId,
+          decision: isObserveMode ? 'OBSERVE' : ruleEffect,
+          effective_decision: isObserveMode ? 'ALLOW' : ruleEffect,
+          observed_verdict: ruleEffect,
+          risk_score: ruleEffect === 'BLOCK' ? 0.95 : 0.65,
+          reason: customPolicyRes.reason,
+          receipt_id: receipt.receipt_id,
+          receipt,
+          matched_policies: [{ rule_id: customPolicyRes.matchedRule.rule_id, name: customPolicyRes.matchedRule.name }],
+          shadow_mode_active: Boolean(shadow_mode),
+        }),
+      };
+    }
+
     // 4. Safe / Allowed Execution
     trackAgentStats('ALLOW');
     const reason = 'Action conforms to safety policies, invariant rules, and verified fact preconditions.';
@@ -3622,9 +3959,78 @@ app.get('/api/v1/audits/export', (_req: Request, res: Response) => {
   });
 });
 
-// Policies
-app.get('/api/v1/policies', (_req: Request, res: Response) => {
+// Policies (Global Defaults + Tenant Custom Programmable Firewall Rules)
+app.get('/api/v1/policies', (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  if (tenantId) {
+    return res.json(dbState.policies.filter((p) => !p.tenant_id || p.tenant_id === tenantId));
+  }
   res.json(dbState.policies);
+});
+
+app.post('/api/v1/policies', (req: Request, res: Response) => {
+  const { name, description, capability_pattern, target_pattern, action_effect, rollout_mode, max_amount_usd, blocked_keywords, risk_level } = req.body || {};
+  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+  if (!name || !capability_pattern) {
+    return res.status(400).json({ error: 'name and capability_pattern are required.' });
+  }
+  const newRule: PolicyRule = {
+    rule_id: `POL-USR-${crypto.randomUUID().slice(0, 6).toUpperCase()}`,
+    tenant_id: callerTenant,
+    name: String(name).trim().slice(0, 120),
+    description: String(description || 'Custom Tenant Firewall Rule').trim().slice(0, 300),
+    capability_pattern: String(capability_pattern).trim(),
+    target_pattern: String(target_pattern || '*').trim(),
+    action_effect: action_effect === 'REQUIRE_APPROVAL' ? 'REQUIRE_APPROVAL' : action_effect === 'ALLOW' ? 'ALLOW' : 'BLOCK',
+    rollout_mode: rollout_mode === 'SHADOW' ? 'SHADOW' : 'ENFORCE',
+    max_amount_usd: typeof max_amount_usd === 'number' && max_amount_usd > 0 ? max_amount_usd : undefined,
+    blocked_keywords: Array.isArray(blocked_keywords)
+      ? blocked_keywords.map((k) => String(k).trim()).filter(Boolean)
+      : typeof blocked_keywords === 'string'
+      ? blocked_keywords.split(',').map((k) => k.trim()).filter(Boolean)
+      : undefined,
+    risk_level: String(risk_level || 'HIGH').toUpperCase(),
+    is_active: true,
+    is_custom: true,
+    created_at: new Date().toISOString(),
+  };
+  dbState.policies.unshift(newRule);
+  persistDatabase();
+  res.status(201).json(newRule);
+});
+
+app.patch('/api/v1/policies/:id', (req: Request, res: Response) => {
+  const rule = dbState.policies.find((p) => p.rule_id === req.params.id);
+  if (!rule) return res.status(404).json({ error: 'Policy rule not found.' });
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && rule.tenant_id && rule.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant policy modification prohibited.' });
+  }
+  const { is_active, rollout_mode, max_amount_usd, action_effect } = req.body || {};
+  if (typeof is_active === 'boolean') rule.is_active = is_active;
+  if (rollout_mode === 'SHADOW' || rollout_mode === 'ENFORCE') rule.rollout_mode = rollout_mode;
+  if (typeof max_amount_usd === 'number') rule.max_amount_usd = max_amount_usd > 0 ? max_amount_usd : undefined;
+  if (action_effect === 'BLOCK' || action_effect === 'REQUIRE_APPROVAL' || action_effect === 'ALLOW') {
+    rule.action_effect = action_effect;
+  }
+  persistDatabase();
+  res.json(rule);
+});
+
+app.delete('/api/v1/policies/:id', (req: Request, res: Response) => {
+  const idx = dbState.policies.findIndex((p) => p.rule_id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Policy rule not found.' });
+  const rule = dbState.policies[idx];
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && rule.tenant_id && rule.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant policy deletion prohibited.' });
+  }
+  if (!rule.is_custom) {
+    return res.status(400).json({ error: 'Built-in baseline policies cannot be deleted; disable them instead.' });
+  }
+  dbState.policies.splice(idx, 1);
+  persistDatabase();
+  res.json({ status: 'deleted', rule_id: req.params.id });
 });
 
 // Connectors
@@ -5943,6 +6349,365 @@ app.post('/api/v1/agents/:id/evaluate-capability', (req: Request, res: Response)
   dbState.capabilityEvidenceReceipts.unshift(receipt);
   persistDatabase();
   res.status(201).json({ success: true, capability_evidence_receipt: receipt });
+});
+
+// -------------------------------------------------------------
+// Unicorn Capabilities APIs:
+// 1. Pre-Flight Counterfactual Time-Machine & Blast-Radius Simulator
+// 2. Emergency Kill Switches & Autonomous Circuit Breakers
+// 3. Cryptographic Receipt Verifier & Agent Trust Passports
+// 4. Signed Alert Webhooks & Zero-Dependency CI/CD Release Gate
+// -------------------------------------------------------------
+
+app.get('/api/v1/simulator/runs', (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  const list = tenantId
+    ? (dbState.simulationRuns || []).filter((s) => s.tenant_id === tenantId)
+    : dbState.simulationRuns || [];
+  res.json(list.slice(0, 30));
+});
+
+app.post('/api/v1/simulator/preflight', (req: Request, res: Response) => {
+  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+  const { name, overrides, candidate_actions } = req.body || {};
+
+  const tenantReceipts = dbState.receipts.filter(
+    (r) => !r.tenant_id || r.tenant_id === callerTenant || (callerTenant === 'tenant_default' && r.tenant_id === 'tenant-corp-acme')
+  );
+
+  const simResult = evaluateCounterfactualSimulation({
+    tenantId: callerTenant,
+    name: String(name || 'Pre-Flight Blast-Radius Simulation').slice(0, 120),
+    overrides: overrides || {},
+    historicalReceipts: tenantReceipts,
+    candidateActions: Array.isArray(candidate_actions) ? candidate_actions : [],
+  });
+
+  dbState.simulationRuns.unshift(simResult);
+  if (dbState.simulationRuns.length > 40) dbState.simulationRuns = dbState.simulationRuns.slice(0, 40);
+  persistDatabase();
+  res.status(201).json(simResult);
+});
+
+// Emergency Kill Switches
+app.get('/api/v1/kill-switches', (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  const list = tenantId
+    ? (dbState.killSwitches || []).filter((k) => k.tenant_id === tenantId)
+    : dbState.killSwitches || [];
+  res.json(list);
+});
+
+app.post('/api/v1/kill-switches/trigger', (req: Request, res: Response) => {
+  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+  const { scope_type, scope_value, reason, triggered_by } = req.body || {};
+
+  const validScope: KillSwitchRecord['scope_type'] =
+    scope_type === 'AGENT' || scope_type === 'CAPABILITY' ? scope_type : 'GLOBAL_TENANT';
+  const finalScopeVal =
+    validScope === 'GLOBAL_TENANT' ? callerTenant : String(scope_value || '*').trim();
+
+  if (validScope === 'AGENT' && finalScopeVal !== '*') {
+    const targetAgent = dbState.agents.find((a) => a.agent_id === finalScopeVal);
+    if (targetAgent && targetAgent.tenant_id && targetAgent.tenant_id !== callerTenant) {
+      return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant kill switch prohibited.' });
+    }
+  }
+
+  const sw: KillSwitchRecord = {
+    switch_id: `ksw-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: callerTenant,
+    scope_type: validScope,
+    scope_value: finalScopeVal,
+    reason: String(reason || 'Manual emergency freeze triggered by operator').slice(0, 300),
+    triggered_by: String(triggered_by || 'supervisor').slice(0, 80),
+    auto_triggered: false,
+    status: 'ACTIVE',
+    triggered_at: new Date().toISOString(),
+    blocked_hits_count: 0,
+  };
+
+  dbState.killSwitches.unshift(sw);
+  dispatchAlertWebhookEvent(callerTenant, 'KILL_SWITCH_TRIPPED', {
+    switch_id: sw.switch_id,
+    scope_type: sw.scope_type,
+    scope_value: sw.scope_value,
+    reason: sw.reason,
+  });
+  persistDatabase();
+  res.status(201).json(sw);
+});
+
+app.post('/api/v1/kill-switches/:id/resume', (req: Request, res: Response) => {
+  const sw = dbState.killSwitches.find((k) => k.switch_id === req.params.id);
+  if (!sw) return res.status(404).json({ error: 'Kill switch not found.' });
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && sw.tenant_id && callerTenant !== sw.tenant_id) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant kill switch resume prohibited.' });
+  }
+  sw.status = 'RESUMED';
+  sw.resumed_at = new Date().toISOString();
+
+  // Also reset any circuit breaker linked to this switch
+  for (const brk of dbState.circuitBreakers || []) {
+    if (brk.linked_switch_id === sw.switch_id) {
+      brk.status = 'CLOSED';
+      brk.recent_block_timestamps = [];
+    }
+  }
+  persistDatabase();
+  res.json({ success: true, kill_switch: sw });
+});
+
+// Autonomous Circuit Breakers
+app.get('/api/v1/circuit-breakers', (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  const list = tenantId
+    ? (dbState.circuitBreakers || []).filter((b) => b.tenant_id === tenantId || b.tenant_id === 'tenant_default')
+    : dbState.circuitBreakers || [];
+  res.json(list);
+});
+
+app.post('/api/v1/circuit-breakers', (req: Request, res: Response) => {
+  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+  const { name, target_scope, target_id, max_consecutive_blocks, window_seconds, enabled } = req.body || {};
+  const brk: CircuitBreakerRule = {
+    breaker_id: `brk-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: callerTenant,
+    name: String(name || 'Anomaly & Loop Circuit Breaker').slice(0, 120),
+    target_scope: target_scope === 'TENANT' ? 'TENANT' : 'AGENT',
+    target_id: String(target_id || '*').trim(),
+    max_consecutive_blocks: Math.max(2, Math.min(50, Number(max_consecutive_blocks || 3))),
+    window_seconds: Math.max(10, Math.min(3600, Number(window_seconds || 120))),
+    recent_block_timestamps: [],
+    status: 'CLOSED',
+    enabled: enabled !== false,
+    trip_count: 0,
+    created_at: new Date().toISOString(),
+  };
+  dbState.circuitBreakers.unshift(brk);
+  persistDatabase();
+  res.status(201).json(brk);
+});
+
+app.post('/api/v1/circuit-breakers/:id/toggle', (req: Request, res: Response) => {
+  const brk = dbState.circuitBreakers.find((b) => b.breaker_id === req.params.id);
+  if (!brk) return res.status(404).json({ error: 'Circuit breaker not found.' });
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && brk.tenant_id && brk.tenant_id !== 'tenant_default' && callerTenant !== brk.tenant_id) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant breaker update prohibited.' });
+  }
+  const { enabled, reset } = req.body || {};
+  if (typeof enabled === 'boolean') brk.enabled = enabled;
+  if (reset) {
+    brk.status = 'CLOSED';
+    brk.recent_block_timestamps = [];
+  }
+  persistDatabase();
+  res.json({ success: true, circuit_breaker: brk });
+});
+
+// Signed Alert Webhooks
+app.get('/api/v1/alert-webhooks', (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  const list = (dbState.alertWebhooks || [])
+    .filter((w) => !tenantId || w.tenant_id === tenantId)
+    .map(({ signing_secret_hash: _hidden, ...safe }) => safe);
+  res.json(list);
+});
+
+app.get('/api/v1/alert-webhooks/deliveries', (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  const list = (dbState.webhookDeliveries || []).filter((d) => !tenantId || d.tenant_id === tenantId);
+  res.json(list.slice(0, 40));
+});
+
+app.post('/api/v1/alert-webhooks', (req: Request, res: Response) => {
+  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+  const { name, target_url, events } = req.body || {};
+  if (!target_url || isSsrfUnsafeUrl(String(target_url))) {
+    return res.status(400).json({ error: 'Invalid or SSRF-blocked webhook URL. Use a public HTTPS endpoint.' });
+  }
+  const rawSecret = `cck_whsec_${crypto.randomBytes(16).toString('hex')}`;
+  const sub: AlertWebhookSubscription = {
+    webhook_id: `whk-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: callerTenant,
+    name: String(name || 'Slack / PagerDuty Security Feed').slice(0, 100),
+    target_url: String(target_url).trim(),
+    events: Array.isArray(events) && events.length > 0 ? events.map(String) : ['KILL_SWITCH_TRIPPED', 'CIRCUIT_BREAKER_OPENED', 'HIGH_RISK_BLOCK'],
+    signing_secret_prefix: `${rawSecret.slice(0, 14)}...`,
+    signing_secret_hash: crypto.createHash('sha256').update(rawSecret).digest('hex'),
+    is_active: true,
+    created_at: new Date().toISOString(),
+  };
+  dbState.alertWebhooks.unshift(sub);
+  persistDatabase();
+  res.status(201).json({
+    webhook_id: sub.webhook_id,
+    name: sub.name,
+    target_url: sub.target_url,
+    events: sub.events,
+    signing_secret_prefix: sub.signing_secret_prefix,
+    signing_secret: rawSecret,
+    is_active: true,
+    created_at: sub.created_at,
+  });
+});
+
+app.post('/api/v1/alert-webhooks/:id/test', (req: Request, res: Response) => {
+  const sub = dbState.alertWebhooks.find((w) => w.webhook_id === req.params.id);
+  if (!sub) return res.status(404).json({ error: 'Webhook subscription not found.' });
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && sub.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant webhook access prohibited.' });
+  }
+  dispatchAlertWebhookEvent(sub.tenant_id, 'HIGH_RISK_BLOCK', {
+    test: true,
+    message: 'CCK Signed Security Alert Connectivity Test',
+  });
+  persistDatabase();
+  res.json({ success: true, delivery: dbState.webhookDeliveries[0] });
+});
+
+app.delete('/api/v1/alert-webhooks/:id', (req: Request, res: Response) => {
+  const idx = dbState.alertWebhooks.findIndex((w) => w.webhook_id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Webhook subscription not found.' });
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && dbState.alertWebhooks[idx].tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant webhook deletion prohibited.' });
+  }
+  dbState.alertWebhooks.splice(idx, 1);
+  persistDatabase();
+  res.json({ status: 'deleted', webhook_id: req.params.id });
+});
+
+// Cryptographic Receipt Verifier & Agent Trust Passport
+app.post('/api/v1/receipts/:id/verify-proof', (req: Request, res: Response) => {
+  const receipt = dbState.receipts.find((r) => r.receipt_id === req.params.id);
+  if (!receipt) return res.status(404).json({ error: 'Receipt not found.' });
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && req.query.share !== 'true' && receipt.tenant_id && receipt.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant receipt verification prohibited.' });
+  }
+  const { tamper_simulation } = req.body || {};
+  const result = verifyReceiptProof({
+    storedReceipt: receipt,
+    auditLedger: dbState.auditLedger,
+    hmacSecret: CCK_SIGNING_SECRET,
+    candidateTamper: tamper_simulation || undefined,
+  });
+  res.json(result);
+});
+
+app.get('/api/v1/public/verify/:id', (req: Request, res: Response) => {
+  const receipt = dbState.receipts.find((r) => r.receipt_id === req.params.id);
+  if (!receipt) return res.status(404).json({ error: 'Receipt not found.' });
+  const verification = verifyReceiptProof({
+    storedReceipt: receipt,
+    auditLedger: dbState.auditLedger,
+    hmacSecret: CCK_SIGNING_SECRET,
+  });
+  res.json({
+    verification,
+    receipt_summary: redactObject({
+      receipt_id: receipt.receipt_id,
+      action_id: receipt.action_id,
+      timestamp: receipt.timestamp,
+      status: receipt.status,
+      agent_id: receipt.agent_id,
+      capability: receipt.action.capability,
+    }),
+  });
+});
+
+app.get('/api/v1/agents/:id/passport', (req: Request, res: Response) => {
+  const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
+  if (!agent) return res.status(404).json({ error: 'Agent not found.' });
+  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
+  if (callerTenant && agent.tenant_id && agent.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent passport prohibited.' });
+  }
+  const agentReceipts = dbState.receipts.filter((r) => r.agent_id === agent.agent_id);
+  const activeSwitches = (dbState.killSwitches || []).filter(
+    (s) => s.status === 'ACTIVE' && s.tenant_id === agent.tenant_id && (s.scope_type === 'GLOBAL_TENANT' || (s.scope_type === 'AGENT' && s.scope_value === agent.agent_id))
+  ).length;
+  const openIncidents = dbState.incidents.filter(
+    (i) => i.agent_id === agent.agent_id && i.status !== 'RESOLVED'
+  ).length;
+
+  const passport = computeAgentTrustPassport({
+    agent,
+    agentReceipts,
+    activeKillSwitchesCount: activeSwitches,
+    openIncidentsCount: openIncidents,
+    chainVerified: true,
+  });
+  res.json(passport);
+});
+
+app.get('/api/v1/agents/:id/badge.svg', (req: Request, res: Response) => {
+  const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
+  if (!agent) return res.status(404).send('Agent not found');
+  const agentReceipts = dbState.receipts.filter((r) => r.agent_id === agent.agent_id);
+  const activeSwitches = (dbState.killSwitches || []).filter(
+    (s) => s.status === 'ACTIVE' && s.tenant_id === agent.tenant_id && (s.scope_type === 'GLOBAL_TENANT' || (s.scope_type === 'AGENT' && s.scope_value === agent.agent_id))
+  ).length;
+  const openIncidents = dbState.incidents.filter(
+    (i) => i.agent_id === agent.agent_id && i.status !== 'RESOLVED'
+  ).length;
+  const passport = computeAgentTrustPassport({
+    agent,
+    agentReceipts,
+    activeKillSwitchesCount: activeSwitches,
+    openIncidentsCount: openIncidents,
+    chainVerified: true,
+  });
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.send(passport.badge_svg);
+});
+
+// Zero-Dependency CI/CD Release Gate
+app.get('/api/v1/ci/reports', (req: Request, res: Response) => {
+  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+  const list = (dbState.ciGateReports || []).filter((r) => !tenantId || r.tenant_id === tenantId);
+  res.json(list.slice(0, 20));
+});
+
+app.post('/api/v1/ci/gate-check', (req: Request, res: Response) => {
+  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || '';
+  const { agent_id, origin } = req.body || {};
+  const agent = agent_id
+    ? dbState.agents.find((a) => a.agent_id === agent_id)
+    : dbState.agents.find((a) => !callerTenant || a.tenant_id === callerTenant);
+  if (!agent) return res.status(404).json({ error: 'Agent not found for CI release gate check.' });
+  if (callerTenant && agent.tenant_id && agent.tenant_id !== callerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant CI gate check prohibited.' });
+  }
+
+  const effectiveTenant = callerTenant || agent.tenant_id || 'tenant_default';
+  const activeSwitches = (dbState.killSwitches || []).filter(
+    (s) => s.status === 'ACTIVE' && s.tenant_id === effectiveTenant && (s.scope_type === 'GLOBAL_TENANT' || (s.scope_type === 'AGENT' && s.scope_value === agent.agent_id))
+  );
+  const openIncidents = dbState.incidents.filter(
+    (i) => (i.agent_id === agent.agent_id || i.tenant_id === effectiveTenant) && i.status === 'OPEN'
+  );
+  const unverifiedSkillsCount = dbState.skills.filter((s) => s.status === 'UNVERIFIED').length;
+  const reqOrigin = origin || `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
+
+  const report = evaluateCiReleaseGate({
+    tenantId: effectiveTenant,
+    agent,
+    activeSwitches,
+    openIncidents,
+    unverifiedSkillsCount,
+    baseOrigin: reqOrigin,
+  });
+
+  dbState.ciGateReports.unshift(report);
+  if (dbState.ciGateReports.length > 30) dbState.ciGateReports = dbState.ciGateReports.slice(0, 30);
+  persistDatabase();
+  res.json(report);
 });
 
 // -------------------------------------------------------------
