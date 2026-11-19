@@ -1,0 +1,40 @@
+name: 'CCK PR Guardian'
+description: 'Least-privilege Pull Request security and drift verification using CCK Tool Identity, Drift, Permission Graph, and Action Gate policies'
+branding:
+  icon: 'shield'
+  color: 'teal'
+inputs:
+  target_path:
+    description: 'Directory to scan for MCP, tool, connector, and policy configurations'
+    required: false
+    default: '.'
+  fail_on_severity:
+    description: 'Minimum severity to fail the PR check (CRITICAL or HIGH)'
+    required: false
+    default: 'CRITICAL'
+  base_tools_json:
+    description: 'Optional path to base commit tool snapshot JSON'
+    required: false
+    default: ''
+  head_tools_json:
+    description: 'Optional path to head commit tool snapshot JSON'
+    required: false
+    default: ''
+outputs:
+  sarif_file:
+    description: 'Generated SARIF v2.1.0 file path'
+    value: ${{ steps.run-cck.outputs.sarif_file }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Run CCK Local Scan (Read-Only, Zero Untrusted Code Execution)
+      id: run-cck
+      shell: bash
+      run: |
+        npx tsx "${{ github.action_path }}/../../../src/cli/cck.ts" scan "${{ inputs.target_path }}" --format sarif --out cck-scan.sarif --fail-on "${{ inputs.fail_on_severity }}" || SCAN_EXIT=$?
+        npx tsx "${{ github.action_path }}/../../../src/cli/cck.ts" scan "${{ inputs.target_path }}" --format summary || true
+        echo "sarif_file=cck-scan.sarif" >> "$GITHUB_OUTPUT"
+        if [ -n "${{ inputs.base_tools_json }}" ] && [ -n "${{ inputs.head_tools_json }}" ]; then
+          npx tsx "${{ github.action_path }}/../../../src/cli/cck.ts" pr-guard --base-tools "${{ inputs.base_tools_json }}" --head-tools "${{ inputs.head_tools_json }}" --fail-on "${{ inputs.fail_on_severity }}" --format markdown
+        fi
+        exit "${SCAN_EXIT:-0}"

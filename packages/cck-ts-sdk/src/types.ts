@@ -20,6 +20,11 @@ export interface AgentAction {
   session_id: string;
   capability: string;
   target: string;
+  entity_id?: string;
+  tool_id?: string;
+  delegation_id?: string;
+  trace_id?: string;
+  tenant_id?: string;
   parameters?: Record<string, unknown>;
   severity?: ActionSeverity;
   idempotency_key?: string;
@@ -45,6 +50,7 @@ export interface ExecutionVerdict {
   evaluated_at: string;
   shadow_mode?: boolean;
   simulated_decision?: VerdictDecision;
+  receipt_id?: string;
 }
 
 export interface DecisionReceipt {
@@ -74,6 +80,8 @@ export interface HeartbeatResult {
 export interface CCKClientOptions {
   baseUrl?: string;
   apiKey?: string;
+  sessionToken?: string;
+  tenantId?: string;
   timeoutMs?: number;
   maxRetries?: number;
 }

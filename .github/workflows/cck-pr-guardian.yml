@@ -1,0 +1,43 @@
+name: CCK PR Guardian
+
+on:
+  pull_request:
+    branches: [ main ]
+
+# Strict Least-Privilege Permissions:
+# - contents: read (only read checked-out repository files)
+# - security-events: write (optional SARIF upload for GitHub Code Scanning annotations)
+# No personal access tokens, no production secrets, no automatic pushes or deployments.
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  cck-pr-guardian:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (read-only)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies (safe lockfile install)
+        run: npm ci --ignore-scripts || npm install --ignore-scripts
+
+      - name: Run CCK Scanner & PR Guardian
+        uses: ./.github/actions/cck-pr-guardian
+        with:
+          target_path: '.'
+          fail_on_severity: 'CRITICAL'
+
+      - name: Upload CCK SARIF Annotations
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
+        with:
+          sarif_file: cck-scan.sarif

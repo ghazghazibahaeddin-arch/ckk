@@ -19,10 +19,12 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
   };
 
   let tenantA = '';
+  let tokenA = '';
   let projectA = '';
   let agentAId = '';
   let agentAApiKey = '';
   let tenantB = '';
+  let tokenB = '';
   let allowReceiptId = '';
 
   before(async () => {
@@ -44,6 +46,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
     assert.equal(regA.status, 201);
     const dataA = await regA.json();
     tenantA = dataA.user.tenant_id;
+    tokenA = dataA.token;
     projectA = dataA.starter_project.project_id;
 
     const regB = await fetch(`${BASE_URL}/api/v1/auth/register`, {
@@ -54,13 +57,14 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
     assert.equal(regB.status, 201);
     const dataB = await regB.json();
     tenantB = dataB.user.tenant_id;
+    tokenB = dataB.token;
 
     // Create Agent A inside Tenant A
     const agentRes = await fetch(`${BASE_URL}/api/v1/agents`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({
         tenant_id: tenantA,
@@ -82,7 +86,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
     // Ground required fact + perform an initial clean ALLOW action so we have a real historical receipt
     await fetch(`${BASE_URL}/api/v1/facts`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantA },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
       body: JSON.stringify({
         entity_id: `vendor:acct_${ts}`,
         field_name: 'status',
@@ -115,7 +119,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
 
   test('1. Pre-Flight Counterfactual Simulator computes blast radius without mutating production state', async () => {
     const beforeAgentsRes = await fetch(`${BASE_URL}/api/v1/agents`, {
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     const beforeAgents = await beforeAgentsRes.json();
     const agentBefore = beforeAgents.find((a: { agent_id: string }) => a.agent_id === agentAId);
@@ -125,7 +129,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({
         name: 'Pre-Deploy $200 Spend Cap & Drift What-If',
@@ -165,7 +169,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
 
     // Verify zero mutation to agent counters
     const afterAgentsRes = await fetch(`${BASE_URL}/api/v1/agents`, {
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     const afterAgents = await afterAgentsRes.json();
     const agentAfter = afterAgents.find((a: { agent_id: string }) => a.agent_id === agentAId);
@@ -178,7 +182,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({
         name: 'Cap Single Vendor Transfer at $150',
@@ -220,7 +224,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantB,
+        Authorization: `Bearer ${tokenB}`,
       },
       body: JSON.stringify({ rollout_mode: 'ENFORCE' }),
     });
@@ -231,7 +235,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({ rollout_mode: 'ENFORCE' }),
     });
@@ -260,7 +264,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
     // Clean up custom rule so later checks start clean
     const delRes = await fetch(`${BASE_URL}/api/v1/policies/${rule.rule_id}`, {
       method: 'DELETE',
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     assert.equal(delRes.status, 200);
   });
@@ -270,7 +274,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({
         scope_type: 'AGENT',
@@ -337,14 +341,14 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
     // 3. Cross-tenant resume attempt must be rejected with 403
     const crossResume = await fetch(`${BASE_URL}/api/v1/kill-switches/${sw.switch_id}/resume`, {
       method: 'POST',
-      headers: { 'x-tenant-id': tenantB },
+      headers: { Authorization: `Bearer ${tokenB}` },
     });
     assert.equal(crossResume.status, 403);
 
     // 4. Tenant A resumes cleanly
     const resumeRes = await fetch(`${BASE_URL}/api/v1/kill-switches/${sw.switch_id}/resume`, {
       method: 'POST',
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     assert.equal(resumeRes.status, 200);
 
@@ -375,7 +379,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({
         name: 'Bad Localhost Hook',
@@ -389,7 +393,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({
         name: 'SOC Security Alerts Feed',
@@ -403,7 +407,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
 
     // Ensure GET never leaks full signing_secret
     const listWhRes = await fetch(`${BASE_URL}/api/v1/alert-webhooks`, {
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     const listWh = await listWhRes.json();
     assert.equal(listWh[0].signing_secret_hash, undefined);
@@ -413,7 +417,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({
         name: 'Tenant A 3-Strike Auto-Freeze',
@@ -451,7 +455,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
 
     // Breaker must now be OPEN with a linked active Kill Switch
     const brksAfterRes = await fetch(`${BASE_URL}/api/v1/circuit-breakers`, {
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     const brksAfter = await brksAfterRes.json();
     const updatedBrk = brksAfter.find((b: { breaker_id: string }) => b.breaker_id === brk.breaker_id);
@@ -460,7 +464,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
 
     // Signed webhook delivery log should record CIRCUIT_BREAKER_OPENED
     const delivRes = await fetch(`${BASE_URL}/api/v1/alert-webhooks/deliveries`, {
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     const deliveries = await delivRes.json();
     assert.ok(deliveries.some((d: { event_type: string; signature_header: string }) =>
@@ -470,13 +474,13 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
     // Resume the auto-triggered Kill Switch and disable breaker to restore Agent A cleanly
     const resumeAuto = await fetch(`${BASE_URL}/api/v1/kill-switches/${updatedBrk.linked_switch_id}/resume`, {
       method: 'POST',
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     assert.equal(resumeAuto.status, 200);
 
     await fetch(`${BASE_URL}/api/v1/circuit-breakers/${brk.breaker_id}/toggle`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantA },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
       body: JSON.stringify({ enabled: false, reset: true }),
     });
   });
@@ -487,7 +491,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({}),
     });
@@ -503,7 +507,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({
         tamper_simulation: {
@@ -527,7 +531,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
 
     // 4. Agent Trust Passport & Live SVG Badge
     const passportRes = await fetch(`${BASE_URL}/api/v1/agents/${agentAId}/passport`, {
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     assert.equal(passportRes.status, 200);
     const passport = await passportRes.json();
@@ -545,7 +549,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-tenant-id': tenantA,
+        Authorization: `Bearer ${tokenA}`,
       },
       body: JSON.stringify({ agent_id: agentAId }),
     });
@@ -557,14 +561,14 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
     // Triggering an active Kill Switch must force CI Release Gate -> FAIL
     const ksRes = await fetch(`${BASE_URL}/api/v1/kill-switches/trigger`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantA },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
       body: JSON.stringify({ scope_type: 'AGENT', scope_value: agentAId, reason: 'CI block check' }),
     });
     const ks = await ksRes.json();
 
     const ciFailRes = await fetch(`${BASE_URL}/api/v1/ci/gate-check`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantA },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
       body: JSON.stringify({ agent_id: agentAId }),
     });
     assert.equal(ciFailRes.status, 200);
@@ -575,7 +579,7 @@ describe('CCK Knockout Unicorn Capabilities E2E & Security Suite', () => {
     // Resume Kill Switch for clean exit
     await fetch(`${BASE_URL}/api/v1/kill-switches/${ks.switch_id}/resume`, {
       method: 'POST',
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
   });
 });

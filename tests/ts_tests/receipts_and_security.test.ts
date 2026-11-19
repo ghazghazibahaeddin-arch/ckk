@@ -1,12 +1,31 @@
-import { test, describe } from 'node:test';
+import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { createTenantSession, type TenantTestSession } from './_test_auth.ts';
 
 const BASE_URL = 'http://localhost:3000';
 
 describe('CCK Decision Receipts & Fail-Closed Security', () => {
+  let session: TenantTestSession;
+
+  before(async () => {
+    session = await createTenantSession(BASE_URL, 'receipts');
+    // Seed an evaluation so the fresh tenant has at least one receipt
+    await fetch(`${BASE_URL}/api/v1/actions/evaluate`, {
+      method: 'POST',
+      headers: session.headers,
+      body: JSON.stringify({
+        capability: 'telemetry.log',
+        target: 'metrics.check',
+        command: 'ping',
+      }),
+    });
+  });
+
   test('Decision Receipts: Mint, retrieve and verify cryptographic hashes', async () => {
     // Fetch receipts list
-    const res = await fetch(`${BASE_URL}/api/v1/receipts`);
+    const res = await fetch(`${BASE_URL}/api/v1/receipts`, {
+      headers: session.headers,
+    });
     assert.equal(res.status, 200);
     const list = await res.json();
     assert.ok(Array.isArray(list));
@@ -18,7 +37,9 @@ describe('CCK Decision Receipts & Fail-Closed Security', () => {
     assert.ok(first.audit_ref?.action_hash);
 
     // Export HTML
-    const htmlRes = await fetch(`${BASE_URL}/api/v1/receipts/${first.receipt_id}/export?format=html`);
+    const htmlRes = await fetch(`${BASE_URL}/api/v1/receipts/${first.receipt_id}/export?format=html`, {
+      headers: session.headers,
+    });
     assert.equal(htmlRes.status, 200);
     const html = await htmlRes.text();
     assert.match(html, /CCK DECISION RECEIPT/);
@@ -28,7 +49,7 @@ describe('CCK Decision Receipts & Fail-Closed Security', () => {
   test('Fail-Closed: Missing capability/target immediately blocks mutation', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/actions/evaluate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({}),
     });
 
@@ -42,7 +63,7 @@ describe('CCK Decision Receipts & Fail-Closed Security', () => {
   test('Public Benchmark: 100 evaluations pass with 0% false blocks', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/benchmark/run`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
     });
 
     assert.equal(res.status, 200);
@@ -59,7 +80,7 @@ describe('CCK Decision Receipts & Fail-Closed Security', () => {
     // 1. Create a customer agent
     const regRes = await fetch(`${BASE_URL}/api/v1/agents`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         name: 'AutoPaymentAgent',
         framework: 'openai',
@@ -67,8 +88,8 @@ describe('CCK Decision Receipts & Fail-Closed Security', () => {
         target_resource: testEntity,
         guardrail_mode: 'ENFORCE_AND_BLOCK',
         freshness_ttl_seconds: 300,
-        project_id: 'proj-tenant-a',
-        tenant_id: 'tenant-a',
+        project_id: session.projectId,
+        tenant_id: session.tenantId,
       }),
     });
     assert.equal(regRes.status, 201);
@@ -79,7 +100,7 @@ describe('CCK Decision Receipts & Fail-Closed Security', () => {
     // 2. Initial gate evaluation (ALLOW)
     const testRes = await fetch(`${BASE_URL}/api/v1/agents/${agent.agent_id}/test-gate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         action_command: 'finance.transfer $500 to account:acc_99',
       }),
@@ -92,6 +113,7 @@ describe('CCK Decision Receipts & Fail-Closed Security', () => {
     // 3. Toggle drift to invalidate precondition
     const driftRes = await fetch(`${BASE_URL}/api/v1/agents/${agent.agent_id}/drift-toggle`, {
       method: 'POST',
+      headers: session.headers,
     });
     assert.equal(driftRes.status, 200);
     const driftData = await driftRes.json();
@@ -100,7 +122,7 @@ describe('CCK Decision Receipts & Fail-Closed Security', () => {
     // 4. Second gate evaluation must be BLOCKED
     const blockedRes = await fetch(`${BASE_URL}/api/v1/agents/${agent.agent_id}/test-gate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         action_command: 'finance.transfer $500 to account:acc_99',
       }),
@@ -111,12 +133,16 @@ describe('CCK Decision Receipts & Fail-Closed Security', () => {
     assert.match(blockedData.reason, /INVALIDATED/);
 
     // 5. Tenant Isolation: Query agents by project_id
-    const filterRes = await fetch(`${BASE_URL}/api/v1/agents?project_id=proj-tenant-a`);
+    const filterRes = await fetch(`${BASE_URL}/api/v1/agents?project_id=${encodeURIComponent(session.projectId)}`, {
+      headers: session.headers,
+    });
     assert.equal(filterRes.status, 200);
     const isolatedList = await filterRes.json();
     assert.ok(isolatedList.some((a: any) => a.agent_id === agent.agent_id));
 
-    const otherTenantRes = await fetch(`${BASE_URL}/api/v1/agents?project_id=proj-other-unknown`);
+    const otherTenantRes = await fetch(`${BASE_URL}/api/v1/agents?project_id=proj-other-unknown`, {
+      headers: session.headers,
+    });
     assert.equal(otherTenantRes.status, 200);
     const otherList = await otherTenantRes.json();
     assert.equal(otherList.length, 0);

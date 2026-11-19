@@ -14,31 +14,25 @@
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import * as crypto from 'crypto';
-import { CCKClient, withCCKGuard, CCKActionBlockedError } from '../../packages/cck-ts-sdk/src/index.js';
+import { CCKClient, withCCKGuard } from '../../packages/cck-ts-sdk/src/index.js';
+import { createTenantSession, type TenantTestSession } from './_test_auth.ts';
 
 const BASE_URL = 'http://localhost:3000';
 
 describe('CCK SaaS Production Verification Suite', () => {
+  let session: TenantTestSession;
   let createdAgentId: string;
   let createdApiKey: string;
   let testProjectId: string;
 
   before(async () => {
-    // Wait for server if starting up
-    for (let i = 0; i < 5; i++) {
-      try {
-        const res = await fetch(`${BASE_URL}/health`);
-        if (res.ok) break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 500));
-      }
-    }
+    session = await createTenantSession(BASE_URL, 'saas');
   });
 
   test('1. Agent Registration: Initial state is strictly DISCONNECTED (never CONNECTED)', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/agents`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         name: 'AutoFulfillmentAgent',
         framework: 'langgraph',
@@ -93,7 +87,10 @@ describe('CCK SaaS Production Verification Suite', () => {
     assert.equal(data.heartbeat_acknowledged, true);
 
     // Verify agent record in list is now CONNECTED
-    const listRes = await fetch(`${BASE_URL}/api/v1/agents`);
+    const listRes = await fetch(`${BASE_URL}/api/v1/agents`, {
+      headers: session.headers,
+    });
+    assert.equal(listRes.status, 200);
     const list = await listRes.json();
     const found = list.find((a: any) => a.agent_id === createdAgentId);
     assert.ok(found);
@@ -108,7 +105,7 @@ describe('CCK SaaS Production Verification Suite', () => {
     // First ingestion
     const res1 = await fetch(`${BASE_URL}/api/v1/webhooks/ingest`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify(payload),
     });
     assert.equal(res1.status, 200);
@@ -119,7 +116,7 @@ describe('CCK SaaS Production Verification Suite', () => {
     // Second ingestion with identical payload
     const res2 = await fetch(`${BASE_URL}/api/v1/webhooks/ingest`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify(payload),
     });
     assert.equal(res2.status, 200);
@@ -162,7 +159,7 @@ describe('CCK SaaS Production Verification Suite', () => {
     // 1. initialize
     const initRes = await fetch(`${BASE_URL}/api/v1/mcp`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 1,
@@ -170,13 +167,14 @@ describe('CCK SaaS Production Verification Suite', () => {
         params: { protocolVersion: '2024-11-05' },
       }),
     });
+    assert.equal(initRes.status, 200);
     const initData = await initRes.json();
     assert.equal(initData.result.serverInfo.name, 'cck-mcp-server');
 
     // 2. tools/list
     const listRes = await fetch(`${BASE_URL}/api/v1/mcp`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 2,
@@ -184,6 +182,7 @@ describe('CCK SaaS Production Verification Suite', () => {
         params: {},
       }),
     });
+    assert.equal(listRes.status, 200);
     const listData = await listRes.json();
     const toolNames = listData.result.tools.map((t: any) => t.name);
     assert.ok(toolNames.includes('cck_evaluate_action'));
@@ -193,7 +192,7 @@ describe('CCK SaaS Production Verification Suite', () => {
     // 3. tools/call cck_evaluate_action
     const callRes = await fetch(`${BASE_URL}/api/v1/mcp`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 3,
@@ -208,6 +207,7 @@ describe('CCK SaaS Production Verification Suite', () => {
         },
       }),
     });
+    assert.equal(callRes.status, 200);
     const callData = await callRes.json();
     assert.ok(callData.result.content[0].text);
     const verdict = JSON.parse(callData.result.content[0].text);
@@ -244,6 +244,19 @@ describe('CCK SaaS Production Verification Suite', () => {
 
     assert.equal(toolExecuted, true);
     assert.equal(result.success, true);
+
+    // Register tenant-scoped dependency rule for logistics.ship -> order:1099 status
+    const depRes = await fetch(`${BASE_URL}/api/v1/dependencies`, {
+      method: 'POST',
+      headers: session.headers,
+      body: JSON.stringify({
+        project_id: testProjectId,
+        action_capability: 'logistics.ship',
+        required_fact_entity: 'order:1099',
+        required_fact_field: 'status',
+      }),
+    });
+    assert.equal(depRes.status, 200);
 
     // Now invalidate the prerequisite fact (drift)
     await cck.recordEvidence({
@@ -284,18 +297,18 @@ describe('CCK SaaS Production Verification Suite', () => {
   });
 
   test('8. Failure Lab Isolation: Demo simulation records do NOT pollute production customer counters', async () => {
-    const statusBefore = await (await fetch(`${BASE_URL}/api/v1/system/status`)).json();
+    const statusBefore = await (await fetch(`${BASE_URL}/api/v1/system/status`, { headers: session.headers })).json();
     const initialAudits = statusBefore.total_audits;
 
     // Run Failure Lab simulation
     const labRes = await fetch(`${BASE_URL}/api/v1/failure-lab/run`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({ scenario: 'scenario_a_inventory' }),
     });
     assert.equal(labRes.status, 200);
 
-    const statusAfter = await (await fetch(`${BASE_URL}/api/v1/system/status`)).json();
+    const statusAfter = await (await fetch(`${BASE_URL}/api/v1/system/status`, { headers: session.headers })).json();
 
     // INVARIANT: Demo simulations must never increment production customer audits
     assert.equal(statusAfter.total_audits, initialAudits);

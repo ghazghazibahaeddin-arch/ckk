@@ -14,45 +14,61 @@
  * 10. Security Response Headers (X-Content-Type-Options, X-Frame-Options, CSP)
  */
 
-import { test, describe, before, after } from 'node:test';
+import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
 import crypto from 'node:crypto';
+import {
+  createTenantSession,
+  createMemberSession,
+  authHeaders,
+  type TenantTestSession,
+} from './_test_auth.ts';
 
 const BASE_URL = 'http://127.0.0.1:3000';
 
 describe('CCK Red Team Security & Penetration Verification Suite', () => {
+  let alphaSession: TenantTestSession;
+  let bravoSession: TenantTestSession;
+  let operatorToken: string;
   let createdProjectId: string;
   let testKeyId: string;
   let testPlaintextToken: string;
   let foreignProjectId: string;
 
   before(async () => {
-    // 1. Create a primary project in tenant-alpha
+    alphaSession = await createTenantSession(BASE_URL, 'red_alpha');
+    bravoSession = await createTenantSession(BASE_URL, 'red_bravo');
+    const opMember = await createMemberSession(BASE_URL, alphaSession.token, 'operator', 'red_op');
+    operatorToken = opMember.token;
+
+    // 1. Create a primary project in alpha tenant
     const p1 = await fetch(`${BASE_URL}/api/v1/projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'tenant-alpha' },
-      body: JSON.stringify({ name: 'Alpha Secure Project', tenant_id: 'tenant-alpha' }),
+      headers: alphaSession.headers,
+      body: JSON.stringify({ name: 'Alpha Secure Project', tenant_id: alphaSession.tenantId }),
     });
+    assert.equal(p1.status, 201);
     const p1Data = await p1.json();
     createdProjectId = p1Data.project_id;
 
     // 2. Mint an API key for Alpha project
     const k1 = await fetch(`${BASE_URL}/api/v1/projects/${createdProjectId}/keys`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: alphaSession.headers,
       body: JSON.stringify({ name: 'Alpha Agent Key' }),
     });
+    assert.ok(k1.status === 200 || k1.status === 201);
     const k1Data = await k1.json();
     testKeyId = k1Data.key_id;
     testPlaintextToken = k1Data.token;
 
-    // 3. Create a foreign project in tenant-bravo
+    // 3. Create a foreign project in bravo tenant
     const p2 = await fetch(`${BASE_URL}/api/v1/projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'tenant-bravo' },
-      body: JSON.stringify({ name: 'Bravo Foreign Project', tenant_id: 'tenant-bravo' }),
+      headers: bravoSession.headers,
+      body: JSON.stringify({ name: 'Bravo Foreign Project', tenant_id: bravoSession.tenantId }),
     });
+    assert.equal(p2.status, 201);
     const p2Data = await p2.json();
     foreignProjectId = p2Data.project_id;
   });
@@ -74,7 +90,6 @@ describe('CCK Red Team Security & Penetration Verification Suite', () => {
       body: JSON.stringify(payload),
     });
 
-    // Must be rejected with 401 Unauthorized!
     assert.equal(res.status, 401, 'Backdoor header test_bypass must be rejected with 401');
     const data = await res.json();
     assert.equal(data.error, 'INVALID_SIGNATURE');
@@ -105,7 +120,9 @@ describe('CCK Red Team Security & Penetration Verification Suite', () => {
   });
 
   test('RED-03: Secret Disclosure Defense: GET /api/v1/projects/:id/keys NEVER exposes key_hash', async () => {
-    const res = await fetch(`${BASE_URL}/api/v1/projects/${createdProjectId}/keys`);
+    const res = await fetch(`${BASE_URL}/api/v1/projects/${createdProjectId}/keys`, {
+      headers: alphaSession.headers,
+    });
     assert.equal(res.status, 200);
     const keys = await res.json();
     assert.ok(Array.isArray(keys) && keys.length > 0);
@@ -119,9 +136,10 @@ describe('CCK Red Team Security & Penetration Verification Suite', () => {
   });
 
   test('RED-04: Cross-Project Key Revocation Defense: Cannot revoke Key of Project A via Project B URL', async () => {
-    // Attempt to revoke testKeyId (belongs to createdProjectId) through foreignProjectId URL
+    // Attempt to revoke testKeyId (belongs to createdProjectId in Alpha) through foreignProjectId URL using Bravo token
     const res = await fetch(`${BASE_URL}/api/v1/projects/${foreignProjectId}/keys/${testKeyId}`, {
       method: 'DELETE',
+      headers: bravoSession.headers,
     });
 
     assert.equal(res.status, 403, 'Cross-project key revocation must be rejected with 403 Forbidden');
@@ -132,7 +150,7 @@ describe('CCK Red Team Security & Penetration Verification Suite', () => {
   test('RED-05: Cross-Tenant Project Deletion Defense: Tenant Bravo cannot delete Tenant Alpha project', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/projects/${createdProjectId}`, {
       method: 'DELETE',
-      headers: { 'x-tenant-id': 'tenant-bravo' },
+      headers: bravoSession.headers,
     });
 
     assert.equal(res.status, 403, 'Cross-tenant project deletion must be rejected with 403 Forbidden');
@@ -163,6 +181,7 @@ describe('CCK Red Team Security & Penetration Verification Suite', () => {
     // Revoke the key legitimately first
     const revokeRes = await fetch(`${BASE_URL}/api/v1/projects/${createdProjectId}/keys/${testKeyId}`, {
       method: 'DELETE',
+      headers: alphaSession.headers,
     });
     assert.equal(revokeRes.status, 200);
 
@@ -197,7 +216,7 @@ describe('CCK Red Team Security & Penetration Verification Suite', () => {
     for (const cmd of attackCommands) {
       const res = await fetch(`${BASE_URL}/api/v1/actions/evaluate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: alphaSession.headers,
         body: JSON.stringify({
           capability: 'bash.execute',
           target: 'server.root',
@@ -214,11 +233,11 @@ describe('CCK Red Team Security & Penetration Verification Suite', () => {
     }
   });
 
-  test('RED-09: RBAC Enforcement: Standard operator cannot resolve human approvals', async () => {
+  test('RED-09: RBAC Enforcement: Standard operator cannot resolve human approvals (even with spoofed x-user-role header)', async () => {
     // 1. Submit an action requiring human approval
     const evalRes = await fetch(`${BASE_URL}/api/v1/actions/evaluate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: alphaSession.headers,
       body: JSON.stringify({
         capability: 'system.service',
         target: 'systemctl',
@@ -230,19 +249,19 @@ describe('CCK Red Team Security & Penetration Verification Suite', () => {
     const evalData = await evalRes.json();
     assert.equal(evalData.decision, 'REQUIRE_APPROVAL');
 
-    // Retrieve pending approvals
-    const listRes = await fetch(`${BASE_URL}/api/v1/approvals`);
+    // Retrieve pending approvals for Alpha tenant
+    const listRes = await fetch(`${BASE_URL}/api/v1/approvals`, {
+      headers: alphaSession.headers,
+    });
+    assert.equal(listRes.status, 200);
     const approvals = await listRes.json();
     assert.ok(approvals.length > 0);
     const approvalId = approvals[0].approval_id;
 
-    // 2. Attempt unauthorized resolution as operator
+    // 2. Attempt unauthorized resolution as real operator (even attempting forged x-user-role: supervisor header!)
     const unauthorizedRes = await fetch(`${BASE_URL}/api/v1/approvals/${approvalId}/resolve`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-user-role': 'operator',
-      },
+      headers: authHeaders(operatorToken, { 'x-user-role': 'supervisor' }),
       body: JSON.stringify({ approved: true, notes: 'Malicious operator auto-approval' }),
     });
 
@@ -250,13 +269,10 @@ describe('CCK Red Team Security & Penetration Verification Suite', () => {
     const unauthData = await unauthorizedRes.json();
     assert.equal(unauthData.error, 'FORBIDDEN');
 
-    // 3. Authorized resolution as supervisor
+    // 3. Authorized resolution as tenant supervisor
     const supervisorRes = await fetch(`${BASE_URL}/api/v1/approvals/${approvalId}/resolve`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-user-role': 'supervisor',
-      },
+      headers: alphaSession.headers,
       body: JSON.stringify({ approved: true, notes: 'Authorized supervisor signature' }),
     });
     assert.equal(supervisorRes.status, 200, 'Supervisor role must be allowed to resolve approvals');

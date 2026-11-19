@@ -11,6 +11,7 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "npx tsx --test --test-concurrency=1 tests/ts_tests/*.test.ts",
+    "cck": "tsx src/cli/cck.ts",
     "benchmark": "curl -s -X POST http://localhost:3000/api/v1/benchmark/run"
   },
   "dependencies": {

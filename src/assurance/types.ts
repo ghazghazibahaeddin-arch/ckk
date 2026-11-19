@@ -51,6 +51,7 @@ export type ExecutionLifecycleState =
 
 export interface ContractExecutionRecord {
   execution_id: string;
+  tenant_id?: string;
   contract_id: string;
   idempotency_key: string;
   agent_id: string;
@@ -94,6 +95,7 @@ export interface ContractExecutionRecord {
 // -------------------------------------------------------------
 export interface FactVersionHistoryRecord {
   history_id: string;
+  tenant_id?: string;
   entity_id: string;
   field_name: string;
   version: number;
@@ -113,6 +115,7 @@ export interface FactVersionHistoryRecord {
 
 export interface ConflictRecord {
   conflict_id: string;
+  tenant_id?: string;
   entity_id: string;
   field_name: string;
   existing_value: unknown;
@@ -132,6 +135,7 @@ export interface ConflictRecord {
 
 export interface RevalidationNoticeRecord {
   revalidation_id: string;
+  tenant_id?: string;
   fact_key: string;
   affected_receipt_ids: string[];
   affected_agent_ids: string[];
@@ -197,6 +201,7 @@ export interface BusinessInvariantRule {
 // -------------------------------------------------------------
 export interface SkillRecord {
   skill_id: string;
+  tenant_id?: string;
   name: string;
   version: string;
   publisher: {
@@ -232,6 +237,7 @@ export interface SkillRecord {
 // -------------------------------------------------------------
 export interface SkillImpactReceiptRecord {
   impact_receipt_id: string;
+  tenant_id?: string;
   receipt_id?: string; // Convenience alias
   skill_id: string;
   skill_version: string;
@@ -300,6 +306,7 @@ export interface IncidentRecord {
 
 export interface CorrectionPackRecord {
   pack_id: string;
+  tenant_id?: string;
   correction_pack_id?: string; // Convenience alias
   incident_id: string;
   version: string;
@@ -324,6 +331,7 @@ export interface CorrectionPackRecord {
 
 export interface ReplayPackRecord {
   replay_pack_id: string;
+  tenant_id?: string;
   incident_id: string;
   sanitized_inputs: Record<string, unknown>;
   expected_baseline_failure: string;

@@ -1,17 +1,31 @@
 /**
- * CCK Official Model Context Protocol (MCP) Client
+ * CCK Official Model Context Protocol (MCP) Client + Runtime Gateway Example
  *
- * Demonstrates invoking CCK verification tools over JSON-RPC 2.0.
+ * Demonstrates:
+ * 1. Initializing an MCP session against CCK
+ * 2. Discovering available tools (including registered upstream tools)
+ * 3. Evaluating actions via cck_evaluate_action
+ * 4. Recording evidence via cck_record_evidence
+ * 5. Dispatching a downstream MCP tool call physically through cck_gateway_call
  */
 
 async function main() {
   const baseUrl = process.env.CCK_BASE_URL || 'http://localhost:3000';
-  console.log(`[MCP Client] Connecting to CCK MCP Server at ${baseUrl}/api/v1/mcp ...`);
+  const tenantId = process.env.CCK_TENANT_ID || 'tenant_default';
+  console.log(`[MCP Client] Connecting to CCK MCP Gateway at ${baseUrl}/api/v1/mcp ...`);
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-tenant-id': tenantId,
+  };
+  if (process.env.CCK_API_KEY) {
+    headers['Authorization'] = `Bearer ${process.env.CCK_API_KEY}`;
+  }
 
   // 1. Initialize MCP Session
   const initRes = await fetch(`${baseUrl}/api/v1/mcp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: 'mcp-init-1',
@@ -25,7 +39,7 @@ async function main() {
   // 2. Discover MCP Tools
   const toolsRes = await fetch(`${baseUrl}/api/v1/mcp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: 'mcp-tools-2',
@@ -39,7 +53,7 @@ async function main() {
   // 3. Execute cck_evaluate_action via MCP tools/call
   const callRes = await fetch(`${baseUrl}/api/v1/mcp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({
       jsonrpc: '2.0',
       id: 'mcp-call-3',
@@ -60,13 +74,41 @@ async function main() {
   const verdict = verdictText ? JSON.parse(verdictText) : null;
   console.log('[MCP Gate Verdict]:', verdict?.decision, '| Reason:', verdict?.reason);
 
-  // 4. Ingest new evidence via cck_record_evidence
-  const eviRes = await fetch(`${baseUrl}/api/v1/mcp`, {
+  // 4. Fail-closed verification: attempt unregistered tool via cck_gateway_call -> must BLOCK physically
+  const blockedGwRes = await fetch(`${baseUrl}/api/v1/mcp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({
       jsonrpc: '2.0',
-      id: 'mcp-call-4',
+      id: 'mcp-gw-4',
+      method: 'tools/call',
+      params: {
+        name: 'cck_gateway_call',
+        arguments: {
+          tool_name: 'unregistered_dangerous_tool',
+          target: 'prod.database',
+          arguments: { query: 'DROP TABLE orders' },
+        },
+      },
+    }),
+  });
+  const blockedGwData = await blockedGwRes.json();
+  const blockedPayload = blockedGwData.result?.content?.[0]?.text
+    ? JSON.parse(blockedGwData.result.content[0].text)
+    : null;
+  console.log('[MCP Gateway Fail-Closed Check]:', {
+    decision: blockedPayload?.decision,
+    downstream_dispatched: blockedPayload?.downstream_dispatched,
+    isError: blockedGwData.result?.isError,
+  });
+
+  // 5. Ingest new evidence via cck_record_evidence
+  const eviRes = await fetch(`${baseUrl}/api/v1/mcp`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 'mcp-call-5',
       method: 'tools/call',
       params: {
         name: 'cck_record_evidence',

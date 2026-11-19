@@ -345,5 +345,84 @@ def test_scenarios(
     asyncio.run(_run())
 
 
+@app.command("scan")
+def scan_local(
+    target_path: Path = typer.Argument(
+        Path("."),
+        exists=True,
+        help="Target directory or config file to scan locally (read-only)",
+    ),
+    output_format: str = typer.Option("summary", "--format", "-f", help="Output format: summary or json"),
+) -> None:
+    """Run local read-only CCK static scan on MCP/tool/connector manifests without requiring login."""
+    import hashlib
+
+    privacy_blocked = {".env", ".env.local", ".env.production", "id_rsa", "id_ed25519"}
+    scanned: list[str] = []
+    skipped_privacy: list[str] = []
+    findings: list[dict[str, str]] = []
+
+    root = target_path.resolve()
+    candidates = [root] if root.is_file() else sorted(root.rglob("*.json"))
+    for p in candidates:
+        name = p.name.lower()
+        if any(part in {"node_modules", ".git", "dist", ".venv"} for part in p.parts):
+            continue
+        if p.name in privacy_blocked or name.endswith((".pem", ".key")):
+            skipped_privacy.append(str(p.relative_to(root if root.is_dir() else root.parent)))
+            continue
+        if name in {"mcp.json", ".mcp.json", "tools.json", "connector.manifest.json", "cck-connector.json"}:
+            rel = str(p.relative_to(root if root.is_dir() else root.parent))
+            scanned.append(rel)
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                tools = data.get("tools", []) if isinstance(data, dict) else []
+                for t in tools:
+                    if isinstance(t, dict):
+                        perms = t.get("declared_permissions") or t.get("permissions") or []
+                        for perm in perms:
+                            if str(perm).lower() in {"*", "admin", "root", "shell", "exec"}:
+                                findings.append(
+                                    {
+                                        "rule_id": "CCK-PERM-001",
+                                        "severity": "CRITICAL",
+                                        "certainty": "CONFIRMED",
+                                        "file": rel,
+                                        "title": f"Over-privileged permission '{perm}' declared",
+                                    }
+                                )
+            except Exception:
+                findings.append(
+                    {
+                        "rule_id": "CCK-CFG-001",
+                        "severity": "LOW",
+                        "certainty": "CONFIRMED",
+                        "file": rel,
+                        "title": "Malformed JSON configuration",
+                    }
+                )
+
+    report = {
+        "scanner_version": "0.3.0-py",
+        "mode": "LOCAL",
+        "static_analysis_only": True,
+        "files_scanned": scanned,
+        "files_skipped_privacy": skipped_privacy,
+        "findings": findings,
+    }
+    report["report_digest_sha256"] = hashlib.sha256(json.dumps(report, sort_keys=True).encode()).hexdigest()
+
+    if output_format.lower() == "json":
+        typer.echo(json.dumps(report, indent=2))
+    else:
+        console.print(f"[bold cyan]CCK Local Scan[/bold cyan] | Scanned: {len(scanned)} | Findings: {len(findings)}")
+        for f in findings:
+            console.print(f" [{f['severity']}] {f['rule_id']} ({f['file']}): {f['title']}")
+
+    if any(f["severity"] == "CRITICAL" for f in findings):
+        raise typer.Exit(code=2)
+
+
 if __name__ == "__main__":
     app()
+

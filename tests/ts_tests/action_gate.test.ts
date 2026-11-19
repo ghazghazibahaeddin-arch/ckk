@@ -1,14 +1,21 @@
-import { test, describe } from 'node:test';
+import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { createTenantSession, type TenantTestSession } from './_test_auth.ts';
 
 const BASE_URL = 'http://localhost:3000';
 
 describe('CCK Action Gate & Precondition Verification', () => {
+  let session: TenantTestSession;
+
+  before(async () => {
+    session = await createTenantSession(BASE_URL, 'actiongate');
+  });
+
   test('ALLOW: Action succeeds when prerequisite fact is VALID', async () => {
     // Ensure order:test-gate-01 is valid
     await fetch(`${BASE_URL}/api/v1/facts`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         entity_id: 'order:test-gate-01',
         field_name: 'status',
@@ -20,9 +27,9 @@ describe('CCK Action Gate & Precondition Verification', () => {
 
     await fetch(`${BASE_URL}/api/v1/dependencies`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
-        project_id: 'proj-prod-ecommerce',
+        project_id: session.projectId,
         action_capability: 'logistics.ship',
         required_fact_entity: 'order:test-gate-01',
         required_fact_field: 'status',
@@ -31,7 +38,7 @@ describe('CCK Action Gate & Precondition Verification', () => {
 
     const res = await fetch(`${BASE_URL}/api/v1/actions/evaluate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         capability: 'logistics.ship',
         target: 'courier.fedex',
@@ -52,7 +59,7 @@ describe('CCK Action Gate & Precondition Verification', () => {
     // Invalidate order:test-gate-01
     await fetch(`${BASE_URL}/api/v1/facts/invalidate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         entity_id: 'order:test-gate-01',
         field_name: 'status',
@@ -62,7 +69,7 @@ describe('CCK Action Gate & Precondition Verification', () => {
 
     const res = await fetch(`${BASE_URL}/api/v1/actions/evaluate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         capability: 'logistics.ship',
         target: 'courier.fedex',
@@ -82,7 +89,7 @@ describe('CCK Action Gate & Precondition Verification', () => {
   test('BLOCK: Destructive root command (rm -rf /) is unconditionally blocked', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/actions/evaluate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         capability: 'bash.execute',
         target: 'server.root',
@@ -101,7 +108,7 @@ describe('CCK Action Gate & Precondition Verification', () => {
   test('REQUIRE_APPROVAL: System mutations trigger human supervisor queue', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/actions/evaluate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({
         capability: 'bash.execute',
         target: 'systemd.service',

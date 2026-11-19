@@ -79,9 +79,164 @@ import {
   evaluateCiReleaseGate,
 } from './src/assurance/unicorn_engine.ts';
 
+import type {
+  FactRiskClass,
+  FreshnessPolicyRecord,
+  ChangeSourceRecord,
+  ChangeEventRecord,
+  FailedChangeEventRecord,
+  SemanticDiffResult,
+  DependencyNodeRecord,
+  DependencyEdgeRecord,
+  InvalidationCascadeRecord,
+  ToolIdentityRecord,
+  ToolDriftFinding,
+  PermissionGrantRecord,
+  McpUpstreamToolRecord,
+  McpGatewayInvocationRecord,
+} from './src/intelligence/types.ts';
+import {
+  selectFreshnessPolicy,
+  calculateAdaptiveTtlSeconds,
+  evaluateFactFreshness,
+  createFreshnessPolicy,
+} from './src/intelligence/freshness_engine.ts';
+import {
+  computeSemanticDiff,
+  redactSensitiveDiffValue,
+} from './src/intelligence/semantic_diff.ts';
+import {
+  checkRadarRateLimit,
+  isRadarUrlSafe,
+  resolveAndValidateRadarUrl,
+  normalizeChangeEvent,
+  isDuplicateChangeEvent,
+  checkEventOrdering,
+  createFailedChangeEvent,
+  pollExternalRadarSource,
+} from './src/intelligence/change_radar.ts';
+import {
+  makeNodeId,
+  upsertDependencyNode,
+  addDependencyEdge,
+  executeInvalidationCascade,
+  revalidateCascadeNodes,
+  checkProtectedActionCascadeBlock,
+  findDownstreamDependents,
+} from './src/intelligence/dependency_cascade.ts';
+import {
+  registerOrUpdateToolIdentity,
+  evaluateToolDriftPolicy,
+} from './src/intelligence/tool_intelligence.ts';
+import {
+  createPermissionGrant,
+  evaluatePermissionGraph,
+  buildPermissionGraphSnapshot,
+} from './src/intelligence/permission_graph.ts';
+import {
+  executeThroughMcpGateway,
+} from './src/intelligence/mcp_gateway.ts';
+import type {
+  FactSourceObservation,
+  ConflictResolutionPolicy,
+  MultiSourceConflictEvaluation,
+  RevalidationPlanRecord,
+  RegisteredSecretRecord,
+  EphemeralSecretLease,
+  SecretAccessAuditRecord,
+  InvocationContextSnapshot,
+  DataClassificationRule,
+  DataFlowPolicyRecord,
+  DataFlowEvaluationResult,
+  NetworkEgressPolicyRecord,
+  EgressDecisionReceipt,
+  ToolBehaviorBaselineRecord,
+  BehaviorDriftEventRecord,
+  SafeReplayPackRecord,
+} from './src/intelligence/types.ts';
+import {
+  createConflictResolutionPolicy,
+  recordMultiSourceObservation,
+  evaluateMultiSourceConflict,
+} from './src/intelligence/conflict_resolver.ts';
+import {
+  planAndExecuteSmartRevalidation,
+} from './src/intelligence/smart_revalidation.ts';
+import {
+  sanitizeSecretSummary,
+  registerVaultSecret,
+  issueEphemeralSecretLease,
+  revokeSecretOrLease,
+} from './src/intelligence/secret_broker.ts';
+import {
+  createDataClassificationRule,
+  createDataFlowPolicy,
+  evaluateDataFlowGuard,
+} from './src/intelligence/data_flow_guard.ts';
+import {
+  createNetworkEgressPolicy,
+  evaluateNetworkEgress,
+  governedEgressFetch,
+} from './src/intelligence/network_egress.ts';
+import {
+  upsertAndRecordBehaviorBaseline,
+  createSafeReplayPack,
+  executeSafeReplayPack,
+} from './src/intelligence/behavior_replay.ts';
+import type {
+  SourceHealthProfileRecord,
+  ConnectorManifest,
+  ConnectorHarnessReport,
+  ConnectorPackageSubmission,
+  PrGuardianEvaluationReport,
+  TrustProfileRecord,
+  PublisherOwnershipClaim,
+  AdoptionAnalyticsRecord,
+  ScanReport,
+} from './src/intelligence/types.ts';
+import {
+  computeSourceHealthProfile,
+  toPublicSourceHealthProfile,
+} from './src/intelligence/source_health.ts';
+import {
+  createDeclarativeSdkConnector,
+  runConnectorTestHarness,
+  buildConnectorSubmissionRecord,
+  validateConnectorManifest,
+} from './src/intelligence/connector_sdk.ts';
+import {
+  sanitizeScanReportForUpload,
+} from './src/intelligence/scanner.ts';
+import {
+  evaluatePullRequestGuardian,
+} from './src/intelligence/pr_guardian.ts';
+import {
+  createSignedTrustProfile,
+  verifyTrustProfileIntegrity,
+  toPublicTrustProfile,
+  renderTrustProfileBadgeSvg,
+  createPublisherChallengeProof,
+  evaluatePublisherOwnership,
+  computeEffectiveTrustStatus,
+} from './src/intelligence/trust_registry.ts';
+import {
+  recordAdoptionEvent,
+} from './src/intelligence/adoption_analytics.ts';
+
 export const app = express();
 const PORT = 3000;
 const CCK_SIGNING_SECRET = process.env.CCK_SIGNING_SECRET || 'cck-platform-hmac-proof-secret-v1';
+
+let FIREBASE_PROJECT_ID = 'intense-chimera-50z9n';
+try {
+  const fbConfigPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+  if (fs.existsSync(fbConfigPath)) {
+    const parsedFb = JSON.parse(fs.readFileSync(fbConfigPath, 'utf-8'));
+    if (parsedFb?.projectId) FIREBASE_PROJECT_ID = String(parsedFb.projectId);
+  }
+} catch {
+  // Fallback to default Firebase project ID
+}
 
 // Security Headers Middleware (Helmet-equivalent hardening)
 app.use((_req, res, next) => {
@@ -196,10 +351,16 @@ export interface FactRecord {
   evidence_id?: string;
   ttl_seconds: number;
   field_fingerprint: string;
+  tenant_id?: string;
+  risk_class?: FactRiskClass;
+  expires_at?: string;
+  change_timestamps?: string[];
+  stability_score?: number;
 }
 
 export interface EvidenceRecord {
   evidence_id: string;
+  tenant_id?: string;
   entity_id: string;
   field_name: string;
   raw_payload: Record<string, unknown>;
@@ -211,6 +372,7 @@ export interface EvidenceRecord {
 
 export interface DependencyRecord {
   dep_id: string;
+  tenant_id?: string;
   project_id: string;
   action_capability: string;
   required_fact_entity: string;
@@ -238,6 +400,7 @@ export interface PolicyRule {
 
 export interface PendingApprovalRecord {
   approval_id: string;
+  tenant_id?: string;
   action_id: string;
   agent_id: string;
   capability: string;
@@ -358,14 +521,29 @@ export interface UserAccountRecord {
   email?: string;
   display_name: string;
   password_hash: string;
-  role: 'admin' | 'supervisor' | 'operator' | 'developer';
+  role: 'admin' | 'supervisor' | 'operator' | 'developer' | 'viewer';
   tenant_id: string;
   auth_provider: 'password' | 'firebase' | 'sandbox';
   created_at: string;
 }
 
+export interface SessionRecord {
+  session_id: string;
+  token_hash: string;
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: 'admin' | 'supervisor' | 'operator' | 'developer' | 'viewer';
+  tenant_id: string;
+  auth_provider: 'password' | 'firebase' | 'sandbox';
+  created_at: string;
+  expires_at: string;
+  revoked?: boolean;
+}
+
 interface CCKDatabaseSchema {
   users: UserAccountRecord[];
+  sessions: SessionRecord[];
   workspaces: WorkspaceRecord[];
   projects: ProjectRecord[];
   agents: AgentRecord[];
@@ -402,6 +580,46 @@ interface CCKDatabaseSchema {
   webhookDeliveries: WebhookDeliveryRecord[];
   simulationRuns: SimulationRunRecord[];
   ciGateReports: CiGateCheckReport[];
+  // Batch 1: Fact Intelligence + Tool Intelligence + Runtime Enforcement
+  freshnessPolicies: FreshnessPolicyRecord[];
+  changeSources: ChangeSourceRecord[];
+  changeEvents: ChangeEventRecord[];
+  failedChangeEvents: FailedChangeEventRecord[];
+  semanticDiffs: SemanticDiffResult[];
+  dependencyNodes: DependencyNodeRecord[];
+  dependencyEdges: DependencyEdgeRecord[];
+  invalidationCascades: InvalidationCascadeRecord[];
+  toolIdentities: ToolIdentityRecord[];
+  toolDrifts: ToolDriftFinding[];
+  permissionGrants: PermissionGrantRecord[];
+  mcpUpstreams: McpUpstreamToolRecord[];
+  mcpGatewayInvocations: McpGatewayInvocationRecord[];
+  // Batch 2: Conflict Resolution, Smart Revalidation, Secret Broker, Isolation, Data Flow, Network Egress, Behavior Baseline & Safe Replay
+  factObservations: FactSourceObservation[];
+  conflictPolicies: ConflictResolutionPolicy[];
+  conflictEvaluations: MultiSourceConflictEvaluation[];
+  revalidationPlans: RevalidationPlanRecord[];
+  vaultSecrets: RegisteredSecretRecord[];
+  secretLeases: EphemeralSecretLease[];
+  secretAccessLogs: SecretAccessAuditRecord[];
+  invocationContexts: InvocationContextSnapshot[];
+  dataClassifications: DataClassificationRule[];
+  dataFlowPolicies: DataFlowPolicyRecord[];
+  dataFlowEvaluations: DataFlowEvaluationResult[];
+  egressPolicies: NetworkEgressPolicyRecord[];
+  egressReceipts: EgressDecisionReceipt[];
+  behaviorBaselines: ToolBehaviorBaselineRecord[];
+  behaviorDrifts: BehaviorDriftEventRecord[];
+  safeReplayPacks: SafeReplayPackRecord[];
+  // Batch 3: Source Health, Connector SDK & Harness, Scanner, PR Guardian, Trust Registry, Privacy Analytics
+  sourceHealthProfiles: SourceHealthProfileRecord[];
+  connectorHarnessReports: ConnectorHarnessReport[];
+  connectorSubmissions: ConnectorPackageSubmission[];
+  sanitizedScanReports: Array<ReturnType<typeof sanitizeScanReportForUpload> & { tenant_id?: string }>;
+  prGuardianReports: PrGuardianEvaluationReport[];
+  trustProfiles: TrustProfileRecord[];
+  publisherClaims: PublisherOwnershipClaim[];
+  adoptionAnalytics: AdoptionAnalyticsRecord;
 }
 
 // -------------------------------------------------------------
@@ -409,6 +627,7 @@ interface CCKDatabaseSchema {
 // -------------------------------------------------------------
 let dbState: CCKDatabaseSchema = {
   users: [],
+  sessions: [],
   workspaces: [],
   projects: [],
   agents: [],
@@ -442,6 +661,55 @@ let dbState: CCKDatabaseSchema = {
   webhookDeliveries: [],
   simulationRuns: [],
   ciGateReports: [],
+  freshnessPolicies: [],
+  changeSources: [],
+  changeEvents: [],
+  failedChangeEvents: [],
+  semanticDiffs: [],
+  dependencyNodes: [],
+  dependencyEdges: [],
+  invalidationCascades: [],
+  toolIdentities: [],
+  toolDrifts: [],
+  permissionGrants: [],
+  mcpUpstreams: [],
+  mcpGatewayInvocations: [],
+  factObservations: [],
+  conflictPolicies: [],
+  conflictEvaluations: [],
+  revalidationPlans: [],
+  vaultSecrets: [],
+  secretLeases: [],
+  secretAccessLogs: [],
+  invocationContexts: [],
+  dataClassifications: [],
+  dataFlowPolicies: [],
+  dataFlowEvaluations: [],
+  egressPolicies: [],
+  egressReceipts: [],
+  behaviorBaselines: [],
+  behaviorDrifts: [],
+  safeReplayPacks: [],
+  sourceHealthProfiles: [],
+  connectorHarnessReports: [],
+  connectorSubmissions: [],
+  sanitizedScanReports: [],
+  prGuardianReports: [],
+  trustProfiles: [],
+  publisherClaims: [],
+  adoptionAnalytics: {
+    analytics_enabled: true,
+    cli_scans: 0,
+    local_to_integration_conversions: 0,
+    github_guardian_installations: 0,
+    active_projects_count: 0,
+    published_reports: 0,
+    report_shares: 0,
+    new_devs_from_shared_reports: 0,
+    connector_submissions: 0,
+    verified_connector_versions: 0,
+    repeated_usage_events: 0,
+  },
 };
 
 function getInitialCleanDatabase(): CCKDatabaseSchema {
@@ -844,6 +1112,7 @@ function getInitialCleanDatabase(): CCKDatabaseSchema {
 
   return {
     users: [],
+    sessions: [],
     workspaces: [],
     projects: [],
     agents: [],
@@ -892,6 +1161,80 @@ function getInitialCleanDatabase(): CCKDatabaseSchema {
     webhookDeliveries: [],
     simulationRuns: [],
     ciGateReports: [],
+    freshnessPolicies: [
+      createFreshnessPolicy({
+        tenant_id: 'tenant_default',
+        source_id: '*',
+        fact_type: 'payment*',
+        entity_pattern: '*',
+        risk_class: 'CRITICAL',
+        min_ttl_seconds: 10,
+        default_ttl_seconds: 60,
+        max_ttl_seconds: 120,
+        stale_grace_seconds: 0,
+        fail_mode: 'BLOCK_ON_EXPIRED',
+      }),
+      createFreshnessPolicy({
+        tenant_id: 'tenant_default',
+        source_id: '*',
+        fact_type: 'status',
+        entity_pattern: 'order:*',
+        risk_class: 'HIGH',
+        min_ttl_seconds: 15,
+        default_ttl_seconds: 300,
+        max_ttl_seconds: 600,
+        stale_grace_seconds: 15,
+        fail_mode: 'REVALIDATE_ON_STALE',
+      }),
+    ],
+    changeSources: [],
+    changeEvents: [],
+    failedChangeEvents: [],
+    semanticDiffs: [],
+    dependencyNodes: [],
+    dependencyEdges: [],
+    invalidationCascades: [],
+    toolIdentities: [],
+    toolDrifts: [],
+    permissionGrants: [],
+    mcpUpstreams: [],
+    mcpGatewayInvocations: [],
+    factObservations: [],
+    conflictPolicies: [],
+    conflictEvaluations: [],
+    revalidationPlans: [],
+    vaultSecrets: [],
+    secretLeases: [],
+    secretAccessLogs: [],
+    invocationContexts: [],
+    dataClassifications: [],
+    dataFlowPolicies: [],
+    dataFlowEvaluations: [],
+    egressPolicies: [],
+    egressReceipts: [],
+      behaviorBaselines: [],
+    behaviorDrifts: [],
+    safeReplayPacks: [],
+    sourceHealthProfiles: [],
+    connectorHarnessReports: [],
+    connectorSubmissions: [],
+    sanitizedScanReports: [],
+    prGuardianReports: [],
+    trustProfiles: [],
+    publisherClaims: [],
+    adoptionAnalytics: {
+      analytics_enabled: true,
+      cli_scans: 0,
+      local_to_integration_conversions: 0,
+      github_guardian_installations: 0,
+      active_projects_count: 0,
+      published_reports: 0,
+      report_shares: 0,
+      new_devs_from_shared_reports: 0,
+      connector_submissions: 0,
+      verified_connector_versions: 0,
+      repeated_usage_events: 0,
+    },
   };
 }
 
@@ -901,6 +1244,7 @@ function loadDatabase(): void {
       const raw = fs.readFileSync(DATA_FILE, 'utf-8');
       dbState = JSON.parse(raw);
       if (!Array.isArray(dbState.users)) dbState.users = [];
+      if (!Array.isArray(dbState.sessions)) dbState.sessions = [];
       if (!Array.isArray(dbState.receipts)) dbState.receipts = [];
       if (!Array.isArray(dbState.agents)) dbState.agents = [];
       if (!Array.isArray(dbState.contracts)) dbState.contracts = [];
@@ -924,9 +1268,61 @@ function loadDatabase(): void {
       if (!Array.isArray(dbState.webhookDeliveries)) dbState.webhookDeliveries = [];
       if (!Array.isArray(dbState.simulationRuns)) dbState.simulationRuns = [];
       if (!Array.isArray(dbState.ciGateReports)) dbState.ciGateReports = [];
+      if (!Array.isArray(dbState.freshnessPolicies)) dbState.freshnessPolicies = [];
+      if (!Array.isArray(dbState.changeSources)) dbState.changeSources = [];
+      if (!Array.isArray(dbState.changeEvents)) dbState.changeEvents = [];
+      if (!Array.isArray(dbState.failedChangeEvents)) dbState.failedChangeEvents = [];
+      if (!Array.isArray(dbState.semanticDiffs)) dbState.semanticDiffs = [];
+      if (!Array.isArray(dbState.dependencyNodes)) dbState.dependencyNodes = [];
+      if (!Array.isArray(dbState.dependencyEdges)) dbState.dependencyEdges = [];
+      if (!Array.isArray(dbState.invalidationCascades)) dbState.invalidationCascades = [];
+      if (!Array.isArray(dbState.toolIdentities)) dbState.toolIdentities = [];
+      if (!Array.isArray(dbState.toolDrifts)) dbState.toolDrifts = [];
+      if (!Array.isArray(dbState.permissionGrants)) dbState.permissionGrants = [];
+      if (!Array.isArray(dbState.mcpUpstreams)) dbState.mcpUpstreams = [];
+      if (!Array.isArray(dbState.mcpGatewayInvocations)) dbState.mcpGatewayInvocations = [];
+      if (!Array.isArray(dbState.factObservations)) dbState.factObservations = [];
+      if (!Array.isArray(dbState.conflictPolicies)) dbState.conflictPolicies = [];
+      if (!Array.isArray(dbState.conflictEvaluations)) dbState.conflictEvaluations = [];
+      if (!Array.isArray(dbState.revalidationPlans)) dbState.revalidationPlans = [];
+      if (!Array.isArray(dbState.vaultSecrets)) dbState.vaultSecrets = [];
+      if (!Array.isArray(dbState.secretLeases)) dbState.secretLeases = [];
+      if (!Array.isArray(dbState.secretAccessLogs)) dbState.secretAccessLogs = [];
+      if (!Array.isArray(dbState.invocationContexts)) dbState.invocationContexts = [];
+      if (!Array.isArray(dbState.dataClassifications)) dbState.dataClassifications = [];
+      if (!Array.isArray(dbState.dataFlowPolicies)) dbState.dataFlowPolicies = [];
+      if (!Array.isArray(dbState.dataFlowEvaluations)) dbState.dataFlowEvaluations = [];
+      if (!Array.isArray(dbState.egressPolicies)) dbState.egressPolicies = [];
+      if (!Array.isArray(dbState.egressReceipts)) dbState.egressReceipts = [];
+      if (!Array.isArray(dbState.behaviorBaselines)) dbState.behaviorBaselines = [];
+      if (!Array.isArray(dbState.behaviorDrifts)) dbState.behaviorDrifts = [];
+      if (!Array.isArray(dbState.safeReplayPacks)) dbState.safeReplayPacks = [];
+      if (!Array.isArray(dbState.sourceHealthProfiles)) dbState.sourceHealthProfiles = [];
+      if (!Array.isArray(dbState.connectorHarnessReports)) dbState.connectorHarnessReports = [];
+      if (!Array.isArray(dbState.connectorSubmissions)) dbState.connectorSubmissions = [];
+      if (!Array.isArray(dbState.sanitizedScanReports)) dbState.sanitizedScanReports = [];
+      if (!Array.isArray(dbState.prGuardianReports)) dbState.prGuardianReports = [];
+      if (!Array.isArray(dbState.trustProfiles)) dbState.trustProfiles = [];
+      if (!Array.isArray(dbState.publisherClaims)) dbState.publisherClaims = [];
+      if (!dbState.adoptionAnalytics) {
+        dbState.adoptionAnalytics = {
+          analytics_enabled: true,
+          cli_scans: 0,
+          local_to_integration_conversions: 0,
+          github_guardian_installations: 0,
+          active_projects_count: 0,
+          published_reports: 0,
+          report_shares: 0,
+          new_devs_from_shared_reports: 0,
+          connector_submissions: 0,
+          verified_connector_versions: 0,
+          repeated_usage_events: 0,
+        };
+      }
 
       // Seed defaults if empty
       const clean = getInitialCleanDatabase();
+      if (dbState.freshnessPolicies.length === 0) dbState.freshnessPolicies = clean.freshnessPolicies;
       if (dbState.contracts.length === 0) dbState.contracts = clean.contracts;
       if (!dbState.contractExecutions.some((e) => e.execution_id === 'exec-settled-tx-998')) {
         dbState.contractExecutions.push(...clean.contractExecutions);
@@ -1094,9 +1490,13 @@ export function mintDecisionReceipt(params: {
   const shareToken = crypto.randomBytes(16).toString('hex');
   const timestamp = new Date().toISOString();
 
-  // Find relevant facts & evidence for this entity
+  // Find relevant facts & evidence for this entity (tenant-scoped)
   const relevantFacts = dbState.facts
-    .filter((f) => f.entity_id === params.entityId || f.entity_id.includes(params.entityId))
+    .filter(
+      (f) =>
+        (!params.tenantId || !f.tenant_id || f.tenant_id === params.tenantId) &&
+        (f.entity_id === params.entityId || f.entity_id.includes(params.entityId))
+    )
     .map((f) => ({
       entity_id: f.entity_id,
       field_name: f.field_name,
@@ -1107,7 +1507,11 @@ export function mintDecisionReceipt(params: {
     }));
 
   const relevantEvidence = dbState.evidenceList
-    .filter((e) => e.entity_id === params.entityId || e.entity_id.includes(params.entityId))
+    .filter(
+      (e) =>
+        (!params.tenantId || !e.tenant_id || e.tenant_id === params.tenantId) &&
+        (e.entity_id === params.entityId || e.entity_id.includes(params.entityId))
+    )
     .slice(0, 5)
     .map((e) => ({
       evidence_id: e.evidence_id,
@@ -1117,7 +1521,9 @@ export function mintDecisionReceipt(params: {
     }));
 
   const dep = dbState.dependencies.find(
-    (d) => params.capability.startsWith(d.action_capability.replace('*', '')) || d.action_capability === '*'
+    (d) =>
+      (!params.tenantId || !d.tenant_id || d.tenant_id === params.tenantId) &&
+      (params.capability.startsWith(d.action_capability.replace('*', '')) || d.action_capability === '*')
   );
 
   const receipt: DecisionReceiptRecord & { tenant_id?: string } = {
@@ -1162,25 +1568,7 @@ export function mintDecisionReceipt(params: {
 }
 
 function isSsrfUnsafeUrl(rawUrl: string): boolean {
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return true;
-    const h = parsed.hostname.toLowerCase();
-    return (
-      h === 'localhost' ||
-      h === '127.0.0.1' ||
-      h === '0.0.0.0' ||
-      h === '::1' ||
-      h === '[::1]' ||
-      h.startsWith('169.254.') ||
-      h.startsWith('10.') ||
-      h.startsWith('192.168.') ||
-      h.includes('metadata.google.internal') ||
-      h.endsWith('.internal')
-    );
-  } catch {
-    return true;
-  }
+  return !isRadarUrlSafe(rawUrl, false);
 }
 
 function dispatchAlertWebhookEvent(tenantId: string, eventType: string, payload: Record<string, unknown>): void {
@@ -1195,7 +1583,7 @@ function dispatchAlertWebhookEvent(tenantId: string, eventType: string, payload:
     const canonical = JSON.stringify(envelope);
     const sig = 'sha256=' + crypto.createHmac('sha256', sub.signing_secret_hash).update(canonical).digest('hex');
 
-    const unsafe = isSsrfUnsafeUrl(sub.target_url);
+    const unsafeSync = isSsrfUnsafeUrl(sub.target_url);
     const delivery: WebhookDeliveryRecord = {
       delivery_id: `dlv-${crypto.randomUUID().slice(0, 8)}`,
       webhook_id: sub.webhook_id,
@@ -1203,26 +1591,45 @@ function dispatchAlertWebhookEvent(tenantId: string, eventType: string, payload:
       event_type: eventType,
       signature_header: sig,
       payload_preview: payload,
-      status: unsafe ? 'BLOCKED_SSRF' : 'SIGNED_LOGGED',
+      status: unsafeSync ? 'BLOCKED_SSRF' : 'SIGNED_LOGGED',
       delivered_at: now,
     };
     dbState.webhookDeliveries.unshift(delivery);
     sub.last_delivery_at = now;
 
-    if (!unsafe) {
-      fetch(sub.target_url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CCK-Webhook-Signature': sig,
-          'X-CCK-Event': eventType,
-        },
-        body: canonical,
-      })
-        .then((r) => {
-          delivery.status = r.ok ? 'DELIVERED' : 'FAILED';
-          delivery.http_status = r.status;
-          persistDatabase();
+    if (!unsafeSync) {
+      resolveAndValidateRadarUrl(sub.target_url, false)
+        .then(async (dnsCheck) => {
+          if (!dnsCheck.safe) {
+            delivery.status = 'BLOCKED_SSRF';
+            persistDatabase();
+            return;
+          }
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 4000);
+          try {
+            const r = await fetch(sub.target_url, {
+              method: 'POST',
+              redirect: 'manual',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-CCK-Webhook-Signature': sig,
+                'X-CCK-Event': eventType,
+              },
+              body: canonical,
+              signal: controller.signal,
+            });
+            if (r.status >= 300 && r.status < 400) {
+              delivery.status = 'BLOCKED_SSRF';
+              delivery.http_status = r.status;
+            } else {
+              delivery.status = r.ok ? 'DELIVERED' : 'FAILED';
+              delivery.http_status = r.status;
+            }
+            persistDatabase();
+          } finally {
+            clearTimeout(timer);
+          }
         })
         .catch(() => {
           delivery.status = 'SIGNED_LOGGED';
@@ -1356,28 +1763,340 @@ function recordAuditEntry(
 }
 
 // -------------------------------------------------------------
-// Authentication & API Key Middleware
+// Cryptographic Audit Chain Integrity Verifier
 // -------------------------------------------------------------
-function resolveAuthProject(req: Request): ProjectRecord | null {
-  const authHeader = req.headers['authorization'] || '';
-  const apiKeyHeader = req.headers['x-api-key'] as string;
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : apiKeyHeader;
+export function verifyAuditLedgerChain(): {
+  verified: boolean;
+  tamper_detected: boolean;
+  total_records: number;
+  broken_index: number | null;
+  broken_audit_id: string | null;
+  latest_hash: string;
+} {
+  const ledger = dbState.auditLedger || [];
+  let expectedPrev = '0000000000000000000000000000000000000000000000000000000000000000';
+  for (let i = ledger.length - 1; i >= 0; i--) {
+    const cur = ledger[i];
+    if (!cur || cur.previous_hash !== expectedPrev) {
+      return {
+        verified: false,
+        tamper_detected: true,
+        total_records: ledger.length,
+        broken_index: i,
+        broken_audit_id: cur?.audit_id || null,
+        latest_hash: ledger[0]?.action_hash || '0'.repeat(64),
+      };
+    }
+    const rawData = `${cur.previous_hash}|${cur.audit_id}|${cur.action_id}|${cur.agent_id}|${cur.verdict?.decision}|${cur.verdict?.risk_score}|${cur.recorded_at}`;
+    const recomputed = crypto.createHash('sha256').update(rawData).digest('hex');
+    if (recomputed !== cur.action_hash) {
+      return {
+        verified: false,
+        tamper_detected: true,
+        total_records: ledger.length,
+        broken_index: i,
+        broken_audit_id: cur.audit_id,
+        latest_hash: ledger[0]?.action_hash || '0'.repeat(64),
+      };
+    }
+    expectedPrev = cur.action_hash;
+  }
+  return {
+    verified: true,
+    tamper_detected: false,
+    total_records: ledger.length,
+    broken_index: null,
+    broken_audit_id: null,
+    latest_hash: ledger[0]?.action_hash || '0'.repeat(64),
+  };
+}
 
-  if (token && token.startsWith('cck_live_')) {
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const matchedKey = dbState.apiKeys.find((k) => k.key_hash === tokenHash && k.is_active);
-    if (matchedKey) {
-      return dbState.projects.find((p) => p.project_id === matchedKey.project_id) || null;
+// -------------------------------------------------------------
+// Authentication, Firebase Token Verification, Sessions & RBAC Middleware
+// -------------------------------------------------------------
+export type AuthRole = 'admin' | 'supervisor' | 'operator' | 'developer' | 'agent' | 'viewer';
+
+export const SUPERVISOR_ROLES: AuthRole[] = ['admin', 'supervisor'];
+export const WRITE_ROLES: AuthRole[] = ['admin', 'supervisor', 'operator', 'developer', 'agent'];
+export const ALL_AUTH_ROLES: AuthRole[] = ['admin', 'supervisor', 'operator', 'developer', 'agent', 'viewer'];
+
+export interface AuthenticatedContext {
+  tenantId: string;
+  userId: string;
+  username: string;
+  role: AuthRole;
+  authType: 'session' | 'api_key';
+  agentId?: string;
+  projectId?: string;
+  sessionId?: string;
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      cckAuth?: AuthenticatedContext;
     }
   }
+}
 
-  // Fallback to active project query param or default project
-  const requestedProjId = (req.query.project_id as string) || (req.body?.project_id as string);
-  if (requestedProjId) {
-    return dbState.projects.find((p) => p.project_id === requestedProjId) || null;
+const GOOGLE_CERTS_URL = 'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
+let cachedGoogleCerts: Record<string, string> = {};
+let cachedGoogleCertsExpiresAt = 0;
+
+async function getGooglePublicCerts(): Promise<Record<string, string>> {
+  if (Date.now() < cachedGoogleCertsExpiresAt && Object.keys(cachedGoogleCerts).length > 0) {
+    return cachedGoogleCerts;
+  }
+  const resp = await fetch(GOOGLE_CERTS_URL);
+  if (!resp.ok) {
+    throw new Error(`Unable to fetch Google x509 public certs (HTTP ${resp.status})`);
+  }
+  const cacheControl = resp.headers.get('cache-control') || '';
+  const maxAgeMatch = cacheControl.match(/max-age=(\d+)/i);
+  const ttlSec = maxAgeMatch ? Math.max(60, parseInt(maxAgeMatch[1], 10)) : 3600;
+  cachedGoogleCerts = (await resp.json()) as Record<string, string>;
+  cachedGoogleCertsExpiresAt = Date.now() + ttlSec * 1000;
+  return cachedGoogleCerts;
+}
+
+function decodeBase64Url(input: string): Buffer {
+  const padded = input.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(input.length / 4) * 4, '=');
+  return Buffer.from(padded, 'base64');
+}
+
+async function verifyFirebaseIdToken(idToken: string): Promise<{
+  uid: string;
+  email?: string;
+  name?: string;
+  emailVerified?: boolean;
+}> {
+  if (!idToken || typeof idToken !== 'string') {
+    throw new Error('Missing Firebase ID token.');
+  }
+  const parts = idToken.split('.');
+  if (parts.length !== 3) {
+    throw new Error('Malformed Firebase JWT.');
+  }
+  const [headerB64, payloadB64, sigB64] = parts;
+  let header: { alg?: string; kid?: string };
+  let payload: Record<string, any>;
+  try {
+    header = JSON.parse(decodeBase64Url(headerB64).toString('utf8'));
+    payload = JSON.parse(decodeBase64Url(payloadB64).toString('utf8'));
+  } catch {
+    throw new Error('Malformed Firebase JWT encoding.');
+  }
+  if (header.alg !== 'RS256' || !header.kid) {
+    throw new Error('Invalid Firebase token signature algorithm or missing kid.');
+  }
+  const certs = await getGooglePublicCerts();
+  const cert = certs[header.kid];
+  if (!cert) {
+    throw new Error('Unrecognized Firebase signing key ID.');
+  }
+  const verifier = crypto.createVerify('RSA-SHA256');
+  verifier.update(`${headerB64}.${payloadB64}`);
+  verifier.end();
+  const sigBuf = decodeBase64Url(sigB64);
+  if (!verifier.verify(cert, sigBuf)) {
+    throw new Error('Invalid Firebase token cryptographic signature.');
   }
 
-  return dbState.projects[0] || null;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (payload.aud !== FIREBASE_PROJECT_ID) {
+    throw new Error('Firebase token audience mismatch.');
+  }
+  if (payload.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`) {
+    throw new Error('Firebase token issuer mismatch.');
+  }
+  if (!payload.sub || typeof payload.sub !== 'string' || payload.sub.length > 128) {
+    throw new Error('Firebase token subject missing or invalid.');
+  }
+  if (typeof payload.exp !== 'number' || payload.exp <= nowSec) {
+    throw new Error('Firebase token expired.');
+  }
+  if (typeof payload.iat !== 'number' || payload.iat > nowSec + 300) {
+    throw new Error('Firebase token issued in the future.');
+  }
+  return {
+    uid: payload.sub,
+    email: typeof payload.email === 'string' ? payload.email : undefined,
+    name: typeof payload.name === 'string' ? payload.name : undefined,
+    emailVerified: Boolean(payload.email_verified),
+  };
+}
+
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function issueSessionToken(user: {
+  user_id: string;
+  username: string;
+  display_name: string;
+  role: 'admin' | 'supervisor' | 'operator' | 'developer' | 'viewer';
+  tenant_id: string;
+  auth_provider: 'password' | 'firebase' | 'sandbox';
+}): { token: string; session: SessionRecord } {
+  const token = `cck_sess_${crypto.randomBytes(24).toString('hex')}`;
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const nowMs = Date.now();
+  const session: SessionRecord = {
+    session_id: `sess-${crypto.randomUUID().slice(0, 12)}`,
+    token_hash: tokenHash,
+    user_id: user.user_id,
+    username: user.username,
+    display_name: user.display_name,
+    role: user.role,
+    tenant_id: user.tenant_id,
+    auth_provider: user.auth_provider,
+    created_at: new Date(nowMs).toISOString(),
+    expires_at: new Date(nowMs + SESSION_TTL_MS).toISOString(),
+    revoked: false,
+  };
+  if (!Array.isArray(dbState.sessions)) dbState.sessions = [];
+  // Prune expired / revoked / overflow sessions
+  dbState.sessions = dbState.sessions
+    .filter((s) => !s.revoked && new Date(s.expires_at).getTime() > nowMs)
+    .slice(0, 499);
+  dbState.sessions.unshift(session);
+  persistDatabase();
+  return { token, session };
+}
+
+const authRateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function getClientIp(req: Request): string {
+  return (
+    (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
+    req.socket.remoteAddress ||
+    '127.0.0.1'
+  );
+}
+
+function checkAuthRateLimit(key: string, maxAttempts: number, windowMs: number = 300_000): boolean {
+  const now = Date.now();
+  const bucket = authRateBuckets.get(key);
+  if (!bucket || now > bucket.resetAt) {
+    authRateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return true;
+  }
+  bucket.count += 1;
+  return bucket.count <= maxAttempts;
+}
+
+function clearAuthRateLimit(key: string): void {
+  authRateBuckets.delete(key);
+}
+
+export function resolveAuthContext(req: Request):
+  | { ok: true; ctx: AuthenticatedContext }
+  | { ok: false; status: number; error: string; detail: string } {
+  const authHeader = (req.headers['authorization'] as string) || '';
+  const apiKeyHeader = (req.headers['x-api-key'] as string) || '';
+  const rawToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : apiKeyHeader.trim();
+
+  if (!rawToken) {
+    return {
+      ok: false,
+      status: 401,
+      error: 'UNAUTHORIZED',
+      detail: 'Authentication required. Provide a valid Bearer session token or cck_live_ API key.',
+    };
+  }
+
+  const headerTenant = (req.headers['x-tenant-id'] as string)?.trim() || '';
+
+  if (rawToken.startsWith('cck_sess_')) {
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const session = (dbState.sessions || []).find((s) => s.token_hash === tokenHash);
+    if (!session || session.revoked) {
+      return { ok: false, status: 401, error: 'INVALID_SESSION', detail: 'Session token is invalid or has been signed out.' };
+    }
+    if (new Date(session.expires_at).getTime() <= Date.now()) {
+      return { ok: false, status: 401, error: 'SESSION_EXPIRED', detail: 'Session token has expired.' };
+    }
+    if (headerTenant && headerTenant !== session.tenant_id) {
+      return { ok: false, status: 403, error: 'FORBIDDEN', detail: 'Cross-tenant header does not match authenticated session tenant.' };
+    }
+    return {
+      ok: true,
+      ctx: {
+        tenantId: session.tenant_id,
+        userId: session.user_id,
+        username: session.username,
+        role: session.role,
+        authType: 'session',
+        sessionId: session.session_id,
+      },
+    };
+  }
+
+  if (rawToken.startsWith('cck_live_')) {
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const matchedKey = dbState.apiKeys.find((k) => k.key_hash === tokenHash);
+    if (!matchedKey) {
+      return { ok: false, status: 401, error: 'INVALID_CREDENTIALS', detail: 'Provided CCK agent API key is invalid or unrecognized.' };
+    }
+    if (!matchedKey.is_active) {
+      return { ok: false, status: 403, error: 'REVOKED', detail: 'CCK agent API key has been revoked.' };
+    }
+    const matchedAgent =
+      dbState.agents.find((a) => a.key_id === matchedKey.key_id) ||
+      dbState.agents.find((a) => a.project_id === matchedKey.project_id);
+    const matchedProject = dbState.projects.find((p) => p.project_id === matchedKey.project_id);
+    const keyTenant = matchedProject?.tenant_id || matchedAgent?.tenant_id || '';
+    if (!keyTenant) {
+      return { ok: false, status: 401, error: 'ORPHAN_API_KEY', detail: 'API key is not bound to a valid tenant.' };
+    }
+    if (headerTenant && headerTenant !== keyTenant) {
+      return { ok: false, status: 403, error: 'FORBIDDEN', detail: 'Cross-tenant header does not match API key tenant.' };
+    }
+    return {
+      ok: true,
+      ctx: {
+        tenantId: keyTenant,
+        userId: matchedAgent?.agent_id || matchedKey.key_id,
+        username: matchedKey.name,
+        role: 'agent',
+        authType: 'api_key',
+        agentId: matchedAgent?.agent_id,
+        projectId: matchedKey.project_id,
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    status: 401,
+    error: 'UNAUTHORIZED',
+    detail: 'Unrecognized or legacy token format rejected. Obtain a verified cck_sess_ or cck_live_ token.',
+  };
+}
+
+function requireAuth(allowedRoles?: AuthRole[]) {
+  return (req: Request, res: Response, next: express.NextFunction) => {
+    const authRes = resolveAuthContext(req);
+    if (!authRes.ok) {
+      return res.status(authRes.status).json({ error: authRes.error, detail: authRes.detail });
+    }
+    if (allowedRoles && !allowedRoles.includes(authRes.ctx.role)) {
+      return res.status(403).json({
+        error: 'FORBIDDEN',
+        detail: `Insufficient privileges (${authRes.ctx.role}). Required roles: ${allowedRoles.join(', ')}.`,
+      });
+    }
+    req.cckAuth = authRes.ctx;
+    next();
+  };
+}
+
+function enforceTenantBodyMatch(req: Request, auth: AuthenticatedContext): string | null {
+  if (req.body && typeof req.body.tenant_id === 'string' && req.body.tenant_id.trim() && req.body.tenant_id.trim() !== auth.tenantId) {
+    return 'Requested body tenant_id does not match authenticated tenant.';
+  }
+  if (req.query && typeof req.query.tenant_id === 'string' && req.query.tenant_id.trim() && req.query.tenant_id.trim() !== auth.tenantId) {
+    return 'Requested query tenant_id does not match authenticated tenant.';
+  }
+  return null;
 }
 
 // -------------------------------------------------------------
@@ -1399,43 +2118,39 @@ app.get('/api/v1/info', (_req: Request, res: Response) => {
   res.json({
     environment: 'production',
     version: '0.1.0',
-    storage_backend: 'SQLite WAL & Persistent Durable Store',
-    active_policies_count: dbState.policies.filter((p) => p.is_active).length,
+    storage_backend: 'Durable File-Backed JSON Store',
+    active_policies_count: dbState.policies.filter((p) => p.is_active && !p.tenant_id).length,
     tamper_evident_chain_enabled: true,
     connected_engine: 'CCK Native Reliability Engine',
   });
 });
 
-app.get('/api/v1/system/status', (_req: Request, res: Response) => {
-  // Check cryptographic hash chain integrity
-  let verified = true;
-  for (let i = dbState.auditLedger.length - 1; i > 0; i--) {
-    const cur = dbState.auditLedger[i];
-    const prev = dbState.auditLedger[i + 1];
-    if (prev && cur.previous_hash !== prev.action_hash) {
-      verified = false;
-      break;
-    }
-  }
+app.get('/api/v1/system/status', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const chainCheck = verifyAuditLedgerChain();
 
   res.json({
-    status: 'HEALTHY',
+    status: chainCheck.verified ? 'HEALTHY' : 'DEGRADED_CHAIN_INTEGRITY',
     engine_version: '0.1.0',
-    database: 'SQLite WAL & File-Backed JSON Store',
-    total_policies: dbState.policies.length,
-    active_policies: dbState.policies.filter((p) => p.is_active).length,
-    total_audits: dbState.auditLedger.filter((a) => !a.is_demo).length,
-    demo_audits_count: dbState.auditLedger.filter((a) => a.is_demo).length,
-    audit_chain_verified: verified,
-    pending_approvals_count: dbState.pendingApprovals.filter((a) => a.status === 'PENDING').length,
-    active_projects_count: dbState.projects.length,
-    total_facts_tracked: dbState.facts.length,
+    database: 'Durable File-Backed JSON Store',
+    total_policies: dbState.policies.filter((p) => !p.tenant_id || p.tenant_id === auth.tenantId).length,
+    active_policies: dbState.policies.filter((p) => p.is_active && (!p.tenant_id || p.tenant_id === auth.tenantId)).length,
+    total_audits: dbState.auditLedger.filter((a) => !a.is_demo && a.tenant_id === auth.tenantId).length,
+    demo_audits_count: dbState.auditLedger.filter((a) => a.is_demo && a.tenant_id === auth.tenantId).length,
+    audit_chain_verified: chainCheck.verified,
+    pending_approvals_count: dbState.pendingApprovals.filter((a) => a.status === 'PENDING' && a.tenant_id === auth.tenantId).length,
+    active_projects_count: dbState.projects.filter((p) => p.tenant_id === auth.tenantId).length,
+    total_facts_tracked: dbState.facts.filter((f) => f.tenant_id === auth.tenantId).length,
     timestamp: new Date().toISOString(),
   });
 });
 
 // Authentication & Real Multi-Tenant Workspace Hydration
 app.post('/api/v1/auth/register', (req: Request, res: Response) => {
+  const clientIp = getClientIp(req);
+  if (!checkAuthRateLimit(`register:${clientIp}`, 120, 300_000)) {
+    return res.status(429).json({ error: 'AUTH_RATE_LIMIT_EXCEEDED', detail: 'Too many registration requests. Try again shortly.' });
+  }
   const { username, password, display_name, email } = req.body || {};
   const cleanUsername = String(username || '').trim().toLowerCase();
   if (!cleanUsername || !password || String(password).length < 6) {
@@ -1465,10 +2180,17 @@ app.post('/api/v1/auth/register', (req: Request, res: Response) => {
 
   dbState.users.unshift(userRecord);
   const starter = ensureTenantStarterResources(tenantId, safeDisplayName);
-  persistDatabase();
+  const { token } = issueSessionToken({
+    user_id: userRecord.user_id,
+    username: userRecord.username,
+    display_name: userRecord.display_name,
+    role: userRecord.role,
+    tenant_id: userRecord.tenant_id,
+    auth_provider: userRecord.auth_provider,
+  });
 
   res.status(201).json({
-    token: `cck-token-${userId}-${crypto.randomBytes(12).toString('hex')}`,
+    token,
     user: {
       user_id: userRecord.user_id,
       username: userRecord.username,
@@ -1488,17 +2210,33 @@ app.post('/api/v1/auth/login', (req: Request, res: Response) => {
   if (!cleanUsername || !password) {
     return res.status(400).json({ detail: 'Username and password required.' });
   }
+  const clientIp = getClientIp(req);
+  const rlKey = `login:${clientIp}:${cleanUsername}`;
+  if (!checkAuthRateLimit(rlKey, 10, 300_000)) {
+    return res.status(429).json({
+      error: 'AUTH_RATE_LIMIT_EXCEEDED',
+      detail: 'Too many failed login attempts. Please wait 5 minutes before retrying.',
+    });
+  }
 
   const existing = (dbState.users || []).find((u) => u.username.toLowerCase() === cleanUsername);
   if (!existing || !verifyPasswordScrypt(String(password), existing.password_hash)) {
     return res.status(401).json({ detail: 'Invalid username or password.' });
   }
 
+  clearAuthRateLimit(rlKey);
   const starter = ensureTenantStarterResources(existing.tenant_id, existing.display_name);
-  persistDatabase();
+  const { token } = issueSessionToken({
+    user_id: existing.user_id,
+    username: existing.username,
+    display_name: existing.display_name,
+    role: existing.role,
+    tenant_id: existing.tenant_id,
+    auth_provider: existing.auth_provider,
+  });
 
   res.json({
-    token: `cck-token-${existing.user_id}-${crypto.randomBytes(12).toString('hex')}`,
+    token,
     user: {
       user_id: existing.user_id,
       username: existing.username,
@@ -1512,44 +2250,167 @@ app.post('/api/v1/auth/login', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/v1/auth/firebase-session', (req: Request, res: Response) => {
-  const { uid, email, displayName, isSandbox } = req.body || {};
-  if (!uid || typeof uid !== 'string') {
-    return res.status(400).json({ detail: 'uid is required.' });
+app.post('/api/v1/auth/firebase-session', async (req: Request, res: Response) => {
+  const { idToken } = req.body || {};
+  if (!idToken || typeof idToken !== 'string') {
+    return res.status(401).json({
+      error: 'INVALID_FIREBASE_TOKEN',
+      detail: 'Verified Firebase idToken is required.',
+    });
   }
-  const safeUid = uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
-  const tenantId = `tenant_${safeUid}`;
-  const label = String(displayName || email || (isSandbox ? 'Sandbox Explorer' : safeUid)).slice(0, 80);
 
+  let decoded: { uid: string; email?: string; name?: string; emailVerified?: boolean };
+  try {
+    decoded = await verifyFirebaseIdToken(idToken);
+  } catch (err) {
+    return res.status(401).json({
+      error: 'INVALID_FIREBASE_TOKEN',
+      detail: err instanceof Error ? err.message : 'Firebase token verification failed.',
+    });
+  }
+
+  const safeUid = decoded.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+  const tenantId = `tenant_${safeUid}`;
+  const label = String(decoded.name || decoded.email || safeUid).slice(0, 80);
   const starter = ensureTenantStarterResources(tenantId, label);
-  persistDatabase();
+
+  const userPayload = {
+    user_id: `usr-${safeUid.slice(0, 16)}`,
+    username: decoded.email || safeUid,
+    email: decoded.email || undefined,
+    display_name: label,
+    role: 'supervisor' as const, // Never trust client-supplied role
+    tenant_id: tenantId,
+    auth_provider: 'firebase' as const,
+  };
+  const { token } = issueSessionToken(userPayload);
 
   res.json({
-    token: `cck-token-${safeUid}-${crypto.randomBytes(12).toString('hex')}`,
-    user: {
-      user_id: `usr-${safeUid.slice(0, 16)}`,
-      username: email || safeUid,
-      email: email || undefined,
-      display_name: label,
-      role: 'supervisor',
-      tenant_id: tenantId,
-      auth_provider: isSandbox ? 'sandbox' : 'firebase',
-    },
+    token,
+    user: userPayload,
     project: starter.project,
     agent: starter.agent,
   });
 });
 
-app.post('/api/v1/workspace/sync', (req: Request, res: Response) => {
-  const { tenant_id, projects, agents } = req.body || {};
-  const headerTenant = (req.headers['x-tenant-id'] as string) || '';
-  const targetTenant = String(tenant_id || headerTenant || '').trim();
-  if (!targetTenant) {
-    return res.status(400).json({ detail: 'tenant_id is required.' });
+app.post('/api/v1/auth/sandbox', (req: Request, res: Response) => {
+  const clientIp = getClientIp(req);
+  if (!checkAuthRateLimit(`sandbox:${clientIp}`, 60, 300_000)) {
+    return res.status(429).json({ error: 'AUTH_RATE_LIMIT_EXCEEDED', detail: 'Too many sandbox creation requests.' });
   }
-  if (headerTenant && headerTenant !== targetTenant) {
-    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant workspace sync prohibited.' });
+
+  const rawId = typeof req.body?.sandbox_id === 'string' ? req.body.sandbox_id : '';
+  const cleaned = rawId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40);
+  const sandboxId = cleaned && cleaned.startsWith('sandbox_') ? cleaned : `sandbox_${crypto.randomUUID().slice(0, 12)}`;
+  const tenantId = `tenant_${sandboxId}`;
+
+  // Reject any attempt to collide with a non-sandbox tenant
+  if (
+    dbState.users.some((u) => u.tenant_id === tenantId && u.auth_provider !== 'sandbox') ||
+    !tenantId.startsWith('tenant_sandbox_')
+  ) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Invalid or non-sandbox tenant target rejected.' });
   }
+
+  const starter = ensureTenantStarterResources(tenantId, 'Sandbox Explorer');
+  const userPayload = {
+    user_id: `usr-${sandboxId.slice(0, 18)}`,
+    username: `${sandboxId}@sandbox.cck.local`,
+    display_name: 'Sandbox Explorer',
+    role: 'supervisor' as const,
+    tenant_id: tenantId,
+    auth_provider: 'sandbox' as const,
+  };
+  const { token } = issueSessionToken(userPayload);
+
+  res.json({
+    token,
+    sandbox_id: sandboxId,
+    user: userPayload,
+    project: starter.project,
+    agent: starter.agent,
+  });
+});
+
+app.get('/api/v1/auth/me', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const starter = ensureTenantStarterResources(auth.tenantId, auth.username);
+  res.json({
+    user: {
+      user_id: auth.userId,
+      username: auth.username,
+      display_name: auth.username,
+      role: auth.role,
+      tenant_id: auth.tenantId,
+    },
+    starter_project: starter.project,
+  });
+});
+
+app.post('/api/v1/auth/logout', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  if (auth.sessionId) {
+    const sess = (dbState.sessions || []).find((s) => s.session_id === auth.sessionId);
+    if (sess) {
+      sess.revoked = true;
+      persistDatabase();
+    }
+  }
+  res.json({ status: 'signed_out' });
+});
+
+app.post('/api/v1/auth/members', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const { username, password, display_name, role } = req.body || {};
+  const cleanUsername = String(username || '').trim().toLowerCase();
+  if (!cleanUsername || !password || String(password).length < 6) {
+    return res.status(400).json({ detail: 'Valid username and password (min 6 chars) are required.' });
+  }
+  const allowedMemberRoles = ['supervisor', 'operator', 'developer', 'viewer'] as const;
+  const targetRole = allowedMemberRoles.includes(role) ? role : 'operator';
+  if (dbState.users.some((u) => u.username.toLowerCase() === cleanUsername)) {
+    return res.status(409).json({ detail: 'Username already registered.' });
+  }
+  const userId = `usr-${crypto.randomUUID().slice(0, 8)}`;
+  const userRecord: UserAccountRecord = {
+    user_id: userId,
+    username: cleanUsername,
+    display_name: String(display_name || cleanUsername).trim().slice(0, 80),
+    password_hash: hashPasswordScrypt(String(password)),
+    role: targetRole,
+    tenant_id: auth.tenantId,
+    auth_provider: 'password',
+    created_at: new Date().toISOString(),
+  };
+  dbState.users.unshift(userRecord);
+  const { token } = issueSessionToken({
+    user_id: userRecord.user_id,
+    username: userRecord.username,
+    display_name: userRecord.display_name,
+    role: userRecord.role,
+    tenant_id: userRecord.tenant_id,
+    auth_provider: 'password',
+  });
+  res.status(201).json({
+    token,
+    user: {
+      user_id: userRecord.user_id,
+      username: userRecord.username,
+      display_name: userRecord.display_name,
+      role: userRecord.role,
+      tenant_id: userRecord.tenant_id,
+    },
+  });
+});
+
+app.post('/api/v1/workspace/sync', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const tenantMismatch = enforceTenantBodyMatch(req, auth);
+  if (tenantMismatch) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: tenantMismatch });
+  }
+  const targetTenant = auth.tenantId;
+  const { projects, agents } = req.body || {};
 
   let syncedProjects = 0;
   let syncedAgents = 0;
@@ -1558,7 +2419,7 @@ app.post('/api/v1/workspace/sync', (req: Request, res: Response) => {
     for (const p of projects) {
       if (!p?.project_id) continue;
       const existing = dbState.projects.find((ep) => ep.project_id === p.project_id);
-      if (existing && existing.tenant_id !== targetTenant) continue; // Prevent cross-tenant overwrite
+      if (existing && existing.tenant_id !== targetTenant) continue;
       if (!existing) {
         dbState.projects.unshift({
           ...p,
@@ -1574,7 +2435,7 @@ app.post('/api/v1/workspace/sync', (req: Request, res: Response) => {
     for (const a of agents) {
       if (!a?.agent_id) continue;
       const existing = dbState.agents.find((ea) => ea.agent_id === a.agent_id);
-      if (existing && existing.tenant_id !== targetTenant) continue; // Prevent cross-tenant overwrite
+      if (existing && existing.tenant_id !== targetTenant) continue;
       if (!existing) {
         dbState.agents.unshift({
           ...a,
@@ -1586,26 +2447,28 @@ app.post('/api/v1/workspace/sync', (req: Request, res: Response) => {
     }
   }
 
-  ensureTenantStarterResources(targetTenant, 'Workspace Owner');
+  ensureTenantStarterResources(targetTenant, auth.username || 'Workspace Owner');
   persistDatabase();
   res.json({ status: 'synced', tenant_id: targetTenant, synced_projects: syncedProjects, synced_agents: syncedAgents });
 });
 
 // Workspaces & Projects Management
-app.get('/api/v1/projects', (req: Request, res: Response) => {
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string);
-  if (tenantId) {
-    return res.json(dbState.projects.filter((p) => p.tenant_id === tenantId));
-  }
-  res.json(dbState.projects);
+app.get('/api/v1/projects', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.projects.filter((p) => p.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/projects', (req: Request, res: Response) => {
-  const { name, description, tenant_id, rate_limit_per_minute, connectors } = req.body;
+app.post('/api/v1/projects', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const { name, description, rate_limit_per_minute, connectors } = req.body || {};
   const newProject: ProjectRecord = {
     project_id: `proj-${crypto.randomUUID().slice(0, 8)}`,
     name: name || 'New Project',
-    tenant_id: tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant-corp-acme',
+    tenant_id: auth.tenantId,
     description: description || '',
     connectors: connectors || ['in_memory_sandbox'],
     rate_limit_per_minute: rate_limit_per_minute || 1000,
@@ -1617,21 +2480,18 @@ app.post('/api/v1/projects', (req: Request, res: Response) => {
   res.status(201).json(newProject);
 });
 
-app.delete('/api/v1/projects/:id', (req: Request, res: Response) => {
+app.delete('/api/v1/projects/:id', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const proj = dbState.projects.find((p) => p.project_id === req.params.id);
   if (!proj) {
     return res.status(404).json({ detail: 'Project not found' });
   }
-
-  // Cross-tenant protection
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && callerTenant !== proj.tenant_id) {
+  if (proj.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant project deletion prohibited.' });
   }
 
   const idx = dbState.projects.indexOf(proj);
   dbState.projects.splice(idx, 1);
-  // Cleanup related project records
   dbState.apiKeys = dbState.apiKeys.filter((k) => k.project_id !== req.params.id);
   dbState.dependencies = dbState.dependencies.filter((d) => d.project_id !== req.params.id);
   persistDatabase();
@@ -1639,10 +2499,11 @@ app.delete('/api/v1/projects/:id', (req: Request, res: Response) => {
 });
 
 // API Keys Management (Sanitized: key_hash is NEVER exposed)
-app.get('/api/v1/projects/:id/keys', (req: Request, res: Response) => {
+app.get('/api/v1/projects/:id/keys', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const proj = dbState.projects.find((p) => p.project_id === req.params.id);
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (proj && callerTenant && proj.tenant_id !== callerTenant) {
+  if (!proj) return res.status(404).json({ detail: 'Project not found' });
+  if (proj.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant API key inspection prohibited.' });
   }
   const projKeys = dbState.apiKeys
@@ -1658,10 +2519,11 @@ app.get('/api/v1/projects/:id/keys', (req: Request, res: Response) => {
   res.json(projKeys);
 });
 
-app.post('/api/v1/projects/:id/keys', (req: Request, res: Response) => {
+app.post('/api/v1/projects/:id/keys', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const proj = dbState.projects.find((p) => p.project_id === req.params.id);
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (proj && callerTenant && proj.tenant_id !== callerTenant) {
+  if (!proj) return res.status(404).json({ detail: 'Project not found' });
+  if (proj.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant API key creation prohibited.' });
   }
   const { name } = req.body || {};
@@ -1695,19 +2557,17 @@ app.post('/api/v1/projects/:id/keys', (req: Request, res: Response) => {
   });
 });
 
-app.delete('/api/v1/projects/:projId/keys/:keyId', (req: Request, res: Response) => {
+app.delete('/api/v1/projects/:projId/keys/:keyId', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const key = dbState.apiKeys.find((k) => k.key_id === req.params.keyId);
   if (!key) {
     return res.status(404).json({ detail: 'Key not found' });
   }
-
-  // Cross-project & cross-tenant key revocation protection
   if (key.project_id !== req.params.projId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Key does not belong to specified project.' });
   }
   const proj = dbState.projects.find((p) => p.project_id === req.params.projId);
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (proj && callerTenant && proj.tenant_id !== callerTenant) {
+  if (!proj || proj.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant key revocation prohibited.' });
   }
 
@@ -1716,13 +2576,13 @@ app.delete('/api/v1/projects/:projId/keys/:keyId', (req: Request, res: Response)
   return res.json({ status: 'revoked', key_id: req.params.keyId });
 });
 
-app.post('/api/v1/agents/:id/keys', (req: Request, res: Response) => {
+app.post('/api/v1/agents/:id/keys', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
   if (!agent) {
     return res.status(404).json({ detail: 'Agent not found' });
   }
-  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  if (callerTenant && agent.tenant_id && callerTenant !== agent.tenant_id) {
+  if (agent.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent key generation prohibited.' });
   }
 
@@ -1759,29 +2619,33 @@ app.post('/api/v1/agents/:id/keys', (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // AI Agents Management & Live Precondition Testing
 // -------------------------------------------------------------
-app.get('/api/v1/agents', (req: Request, res: Response) => {
+app.get('/api/v1/agents', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const projId = (req.query.project_id as string) || '';
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  let filtered = dbState.agents;
-  if (tenantId) {
-    filtered = filtered.filter((a) => a.tenant_id === tenantId);
-  }
+  let filtered = dbState.agents.filter((a) => a.tenant_id === auth.tenantId);
   if (projId) {
     filtered = filtered.filter((a) => a.project_id === projId);
   }
   res.json(filtered);
 });
 
-app.post('/api/v1/agents', (req: Request, res: Response) => {
-  const { name, framework, target_capability, target_resource, guardrail_mode, freshness_ttl_seconds, webhook_url, project_id, tenant_id } = req.body;
+app.post('/api/v1/agents', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const { name, framework, target_capability, target_resource, guardrail_mode, freshness_ttl_seconds, webhook_url, project_id } = req.body || {};
   if (!name || !target_capability) {
     return res.status(400).json({ detail: 'Agent name and target_capability are required.' });
   }
 
-  const headerTenant = (req.headers['x-tenant-id'] as string) || '';
-  const proj = dbState.projects.find((p) => p.project_id === project_id);
-  const pId = project_id || (proj ? proj.project_id : (dbState.projects[0]?.project_id || 'proj-default'));
-  const tId = tenant_id || headerTenant || (proj ? proj.tenant_id : (dbState.projects[0]?.tenant_id || 'tenant-default'));
+  let proj = project_id ? dbState.projects.find((p) => p.project_id === project_id) : dbState.projects.find((p) => p.tenant_id === auth.tenantId);
+  if (project_id && proj && proj.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant project attachment prohibited.' });
+  }
+  const pId = proj ? proj.project_id : (project_id || `proj-${auth.tenantId.slice(-8)}`);
+  const tId = auth.tenantId;
 
   const agentId = `agt-${crypto.randomUUID().slice(0, 8)}`;
   const keyId = `key-${crypto.randomUUID().slice(0, 8)}`;
@@ -1846,6 +2710,11 @@ app.post('/api/v1/agents/:id/heartbeat', (req: Request, res: Response) => {
     return res.status(404).json({ error: 'AGENT_NOT_FOUND', detail: 'Agent not found' });
   }
 
+  const headerTenant = (req.headers['x-tenant-id'] as string)?.trim();
+  if (headerTenant && agent.tenant_id !== headerTenant) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent heartbeat prohibited.' });
+  }
+
   const authHeader = req.headers['authorization'] || '';
   const apiKeyHeader = req.headers['x-api-key'] as string;
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : apiKeyHeader;
@@ -1882,7 +2751,9 @@ app.post('/api/v1/agents/:id/heartbeat', (req: Request, res: Response) => {
     'ALLOW',
     0.0,
     `Agent '${agent.name}' verified connection via live SDK heartbeat.`,
-    'CONNECTED_VERIFIED'
+    'CONNECTED_VERIFIED',
+    false,
+    agent.tenant_id
   );
 
   persistDatabase();
@@ -1897,10 +2768,14 @@ app.post('/api/v1/agents/:id/heartbeat', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/v1/agents/:id/test-gate', async (req: Request, res: Response) => {
+app.post('/api/v1/agents/:id/test-gate', requireAuth(WRITE_ROLES), async (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
   if (!agent) {
     return res.status(404).json({ detail: 'Agent not found' });
+  }
+  if (agent.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent gate test prohibited.' });
   }
 
   const { action_command, target, simulate_drift } = req.body;
@@ -1908,8 +2783,8 @@ app.post('/api/v1/agents/:id/test-gate', async (req: Request, res: Response) => 
   const capability = agent.target_capability || 'resource.mutate';
   const actionId = `act-${crypto.randomUUID().slice(0, 8)}`;
 
-  // Find or create prerequisite fact
-  let fact = dbState.facts.find((f) => f.entity_id === targetResource);
+  // Find or create prerequisite fact scoped strictly to agent tenant
+  let fact = dbState.facts.find((f) => f.tenant_id === auth.tenantId && f.entity_id === targetResource);
   if (!fact) {
     fact = {
       entity_id: targetResource,
@@ -1920,6 +2795,7 @@ app.post('/api/v1/agents/:id/test-gate', async (req: Request, res: Response) => 
       version: 1,
       state: simulate_drift ? 'INVALIDATED' : 'VALID',
       ttl_seconds: agent.freshness_ttl_seconds || 300,
+      tenant_id: auth.tenantId,
       field_fingerprint: crypto.createHash('sha256').update(`${targetResource}:state`).digest('hex'),
     };
     dbState.facts.unshift(fact);
@@ -2006,13 +2882,17 @@ app.post('/api/v1/agents/:id/test-gate', async (req: Request, res: Response) => 
   });
 });
 
-app.post('/api/v1/agents/:id/drift-toggle', (req: Request, res: Response) => {
+app.post('/api/v1/agents/:id/drift-toggle', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
   if (!agent) {
     return res.status(404).json({ detail: 'Agent not found' });
   }
+  if (agent.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant drift toggle prohibited.' });
+  }
   const target = agent.target_resource || 'resource:demo_01';
-  let fact = dbState.facts.find((f) => f.entity_id === target);
+  let fact = dbState.facts.find((f) => f.tenant_id === auth.tenantId && f.entity_id === target);
   if (!fact) {
     fact = {
       entity_id: target,
@@ -2023,12 +2903,12 @@ app.post('/api/v1/agents/:id/drift-toggle', (req: Request, res: Response) => {
       version: 1,
       state: 'VALID',
       ttl_seconds: agent.freshness_ttl_seconds || 300,
+      tenant_id: auth.tenantId,
       field_fingerprint: crypto.createHash('sha256').update(`${target}:state`).digest('hex'),
     };
     dbState.facts.unshift(fact);
   }
 
-  // Toggle state
   const newState = fact.state === 'VALID' ? 'INVALIDATED' : 'VALID';
   fact.state = newState;
   fact.value = newState === 'VALID' ? 'active' : 'revoked_or_expired';
@@ -2044,27 +2924,23 @@ app.post('/api/v1/agents/:id/drift-toggle', (req: Request, res: Response) => {
   });
 });
 
-app.delete('/api/v1/agents/:id', (req: Request, res: Response) => {
+app.delete('/api/v1/agents/:id', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
   if (!agent) {
     return res.status(404).json({ detail: 'Agent not found' });
   }
-
-  // Cross-tenant protection
-  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string);
-  if (callerTenant && agent.tenant_id && callerTenant !== agent.tenant_id) {
+  if (agent.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent deletion prohibited.' });
   }
 
   const idx = dbState.agents.indexOf(agent);
   dbState.agents.splice(idx, 1);
-  // Cascade clean associated delegations
   if (dbState.delegations) {
     dbState.delegations = dbState.delegations.filter(
       (d) => d.delegator_agent_id !== req.params.id && d.delegatee_agent_id !== req.params.id
     );
   }
-  // Cascade clean agent-scoped budgets
   if (dbState.budgets) {
     dbState.budgets = dbState.budgets.filter((b) => !(b.scope_type === 'AGENT' && b.scope_id === req.params.id));
   }
@@ -2074,20 +2950,21 @@ app.delete('/api/v1/agents/:id', (req: Request, res: Response) => {
     'ALLOW',
     0.0,
     `Agent ${agent.agent_id} permanently deleted. Cascaded delegations and budgets purged.`,
-    'AGENT_DELETION'
+    'AGENT_DELETION',
+    false,
+    auth.tenantId
   );
   persistDatabase();
   return res.json({ status: 'deleted', agent_id: req.params.id });
 });
 
-app.post('/api/v1/agents/:id/disconnect', (req: Request, res: Response) => {
+app.post('/api/v1/agents/:id/disconnect', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
   if (!agent) {
     return res.status(404).json({ detail: 'Agent not found' });
   }
-
-  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string);
-  if (callerTenant && agent.tenant_id && callerTenant !== agent.tenant_id) {
+  if (agent.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent disconnection prohibited.' });
   }
 
@@ -2102,29 +2979,30 @@ app.post('/api/v1/agents/:id/disconnect', (req: Request, res: Response) => {
     'ALLOW',
     0.0,
     `Agent ${agent.agent_id} disconnected by supervisor. Active credentials revoked.`,
-    'AGENT_DISCONNECT'
+    'AGENT_DISCONNECT',
+    false,
+    auth.tenantId
   );
   persistDatabase();
   return res.json({ status: 'disconnected', agent });
 });
 
-app.get('/api/v1/agents/:id/export', (req: Request, res: Response) => {
+app.get('/api/v1/agents/:id/export', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
   if (!agent) {
     return res.status(404).json({ detail: 'Agent not found' });
   }
-
-  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string);
-  if (callerTenant && agent.tenant_id && callerTenant !== agent.tenant_id) {
+  if (agent.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent data export prohibited.' });
   }
 
-  const agentAudits = dbState.auditLedger.filter((a) => a.agent_id === agent.agent_id);
-  const agentReceipts = (dbState.receipts || []).filter((r) => r.agent_id === agent.agent_id);
+  const agentAudits = dbState.auditLedger.filter((a) => a.agent_id === agent.agent_id && a.tenant_id === auth.tenantId);
+  const agentReceipts = (dbState.receipts || []).filter((r) => r.agent_id === agent.agent_id && r.tenant_id === auth.tenantId);
   const agentDelegations = (dbState.delegations || []).filter(
-    (d) => d.delegator_agent_id === agent.agent_id || d.delegatee_agent_id === agent.agent_id
+    (d) => d.tenant_id === auth.tenantId && (d.delegator_agent_id === agent.agent_id || d.delegatee_agent_id === agent.agent_id)
   );
-  const agentEvidence = (dbState.capabilityEvidenceReceipts || []).filter((e) => e.agent_id === agent.agent_id);
+  const agentEvidence = (dbState.capabilityEvidenceReceipts || []).filter((e) => e.agent_id === agent.agent_id && e.tenant_id === auth.tenantId);
 
   res.setHeader('Content-Disposition', `attachment; filename="cck-agent-${agent.agent_id}-export.json"`);
   res.json({
@@ -2137,22 +3015,70 @@ app.get('/api/v1/agents/:id/export', (req: Request, res: Response) => {
   });
 });
 
-// Facts Registry, Version History & Conflict Intelligence
-app.get('/api/v1/facts', (_req: Request, res: Response) => {
-  res.json(dbState.facts);
+// Facts Registry, Version History & Conflict Intelligence (with Adaptive Freshness + Semantic Diff + Cascade)
+function syncFactToDependencyGraph(tenantId: string, entityId: string, fieldName: string, state: DependencyNodeRecord['state']) {
+  const factRef = `${entityId}.${fieldName}`;
+  const entNode = upsertDependencyNode({
+    nodes: dbState.dependencyNodes,
+    tenantId,
+    nodeType: 'ENTITY',
+    refId: entityId,
+    label: `Entity ${entityId}`,
+    state: 'VALID',
+  });
+  const factNode = upsertDependencyNode({
+    nodes: dbState.dependencyNodes,
+    tenantId,
+    nodeType: 'FACT',
+    refId: factRef,
+    label: `Fact ${factRef}`,
+    state,
+  });
+  addDependencyEdge({
+    nodes: dbState.dependencyNodes,
+    edges: dbState.dependencyEdges,
+    tenantId,
+    fromNodeId: factNode.node_id,
+    toNodeId: entNode.node_id,
+    relation: 'FEEDS',
+  });
+  return factNode;
+}
+
+app.get('/api/v1/facts', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.facts.filter((f) => f.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/facts', (req: Request, res: Response) => {
-  const { entity_id, field_name, value, source, ttl_seconds, force_override, author } = req.body;
+app.post('/api/v1/facts', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const { entity_id, field_name, value, source, ttl_seconds, force_override, author, risk_class, observed_at, stability_score } = req.body;
+  const tenantId = auth.tenantId;
   const src = source || 'console_user';
-  const existing = dbState.facts.find((f) => f.entity_id === entity_id && f.field_name === field_name);
+  const existing = dbState.facts.find(
+    (f) => f.entity_id === entity_id && f.field_name === field_name && f.tenant_id === tenantId
+  );
+
+  const policy = selectFreshnessPolicy({
+    policies: dbState.freshnessPolicies,
+    tenantId,
+    entityId: entity_id,
+    fieldName: field_name,
+    source: src,
+    explicitRiskClass: risk_class,
+  });
 
   if (existing) {
     // Conflict Intelligence: Do not silently overwrite conflicting information from different sources
-    if (existing.value !== value && existing.source !== src && !force_override) {
+    if (JSON.stringify(existing.value) !== JSON.stringify(value) && existing.source !== src && !force_override) {
       const conflictId = `conf-${crypto.randomUUID().slice(0, 8)}`;
       const conflict: ConflictRecord = {
         conflict_id: conflictId,
+        tenant_id: tenantId,
         entity_id,
         field_name,
         existing_value: existing.value,
@@ -2165,13 +3091,14 @@ app.post('/api/v1/facts', (req: Request, res: Response) => {
       dbState.conflicts.unshift(conflict);
       existing.state = 'CONFLICT';
 
-      // Propagate automated revalidation notice to all dependent action receipts
+      // Propagate automated revalidation notice + dependency graph cascade
       const affectedReceipts = dbState.receipts
-        .filter((r) => r.relevant_facts.some((rf) => rf.entity_id === entity_id && rf.field_name === field_name))
+        .filter((r) => r.tenant_id === tenantId && r.relevant_facts.some((rf) => rf.entity_id === entity_id && rf.field_name === field_name))
         .map((r) => r.receipt_id);
 
       const revalNotice: RevalidationNoticeRecord = {
         revalidation_id: `reval-${crypto.randomUUID().slice(0, 8)}`,
+        tenant_id: tenantId,
         fact_key: `${entity_id}:${field_name}`,
         affected_receipt_ids: affectedReceipts,
         affected_agent_ids: ['agt-console'],
@@ -2181,9 +3108,21 @@ app.post('/api/v1/facts', (req: Request, res: Response) => {
       };
       dbState.revalidations.unshift(revalNotice);
 
-      // Record history
+      const fNode = syncFactToDependencyGraph(tenantId, entity_id, field_name, 'REVALIDATE_REQUIRED');
+      executeInvalidationCascade({
+        nodes: dbState.dependencyNodes,
+        edges: dbState.dependencyEdges,
+        cascades: dbState.invalidationCascades,
+        tenantId,
+        triggerNodeId: fNode.node_id,
+        targetState: 'REVALIDATE_REQUIRED',
+        reason: `Fact conflict between ${existing.source} and ${src}`,
+        traceId: `tr-conf-${conflictId}`,
+      });
+
       dbState.factHistory.unshift({
         history_id: `hist-${crypto.randomUUID().slice(0, 8)}`,
+        tenant_id: tenantId,
         entity_id,
         field_name,
         version: existing.version,
@@ -2210,16 +3149,68 @@ app.post('/api/v1/facts', (req: Request, res: Response) => {
       });
     }
 
+    const sdiff = computeSemanticDiff({
+      tenant_id: tenantId,
+      subject_id: `${entity_id}.${field_name}`,
+      before: existing.value,
+      after: value,
+    });
+    if (sdiff.has_changes) {
+      dbState.semanticDiffs.unshift(sdiff);
+      if (dbState.semanticDiffs.length > 200) dbState.semanticDiffs.pop();
+    }
+
+    const obsIso = observed_at && !Number.isNaN(new Date(observed_at).getTime())
+      ? new Date(observed_at).toISOString()
+      : new Date().toISOString();
+    existing.change_timestamps = [obsIso, ...(existing.change_timestamps || [])].slice(0, 20);
+    if (typeof stability_score === 'number') existing.stability_score = stability_score;
+    if (risk_class) existing.risk_class = risk_class;
+    if (typeof ttl_seconds === 'number' && ttl_seconds > 0) existing.ttl_seconds = ttl_seconds;
+
+    const adaptive = calculateAdaptiveTtlSeconds({
+      policy,
+      factTtlSeconds: existing.ttl_seconds,
+      stabilityScore: existing.stability_score,
+      changeTimestamps: existing.change_timestamps,
+    });
+
     existing.value = value;
     existing.state = 'VALID';
     existing.version += 1;
     existing.source = src;
-    existing.observed_at = new Date().toISOString();
-    existing.field_fingerprint = crypto.createHash('sha256').update(`${entity_id}:${field_name}=${value}:v${existing.version}`).digest('hex');
+    existing.tenant_id = existing.tenant_id || tenantId;
+    existing.observed_at = obsIso;
+    existing.expires_at = new Date(new Date(obsIso).getTime() + adaptive.effective_ttl_seconds * 1000).toISOString();
+    existing.field_fingerprint = crypto.createHash('sha256').update(`${entity_id}:${field_name}=${JSON.stringify(value)}:v${existing.version}`).digest('hex');
+
+    const newValIsInvalid = ['refunded', 'canceled', 'failed', 'revoked', 'expired', 'disputed', 'false', false, 0].includes(value as any);
+    if (newValIsInvalid) {
+      existing.state = 'INVALIDATED';
+      const fNode = syncFactToDependencyGraph(tenantId, entity_id, field_name, 'INVALIDATED');
+      executeInvalidationCascade({
+        nodes: dbState.dependencyNodes,
+        edges: dbState.dependencyEdges,
+        cascades: dbState.invalidationCascades,
+        tenantId,
+        triggerNodeId: fNode.node_id,
+        targetState: 'INVALIDATED',
+        reason: sdiff.summary || `Invalidating value recorded for ${entity_id}.${field_name}`,
+        traceId: `tr-fact-${existing.version}`,
+      });
+    } else {
+      const fNode = syncFactToDependencyGraph(tenantId, entity_id, field_name, 'VALID');
+      revalidateCascadeNodes({
+        nodes: dbState.dependencyNodes,
+        edges: dbState.dependencyEdges,
+        tenantId,
+        rootNodeId: fNode.node_id,
+      });
+    }
 
     if (force_override) {
       dbState.conflicts.forEach((c) => {
-        if (c.entity_id === entity_id && c.field_name === field_name && c.status === 'ACTIVE_CONFLICT') {
+        if ((!c.tenant_id || c.tenant_id === tenantId) && c.entity_id === entity_id && c.field_name === field_name && c.status === 'ACTIVE_CONFLICT') {
           c.status = 'RESOLVED';
           c.resolution = {
             strategy: 'MANUAL_SUPERVISOR',
@@ -2231,9 +3222,9 @@ app.post('/api/v1/facts', (req: Request, res: Response) => {
       });
     }
 
-    // Append to version history
     dbState.factHistory.unshift({
       history_id: `hist-${crypto.randomUUID().slice(0, 8)}`,
+      tenant_id: tenantId,
       entity_id,
       field_name,
       version: existing.version,
@@ -2253,22 +3244,39 @@ app.post('/api/v1/facts', (req: Request, res: Response) => {
     return res.json(existing);
   }
 
+  const obsIso = observed_at && !Number.isNaN(new Date(observed_at).getTime())
+    ? new Date(observed_at).toISOString()
+    : new Date().toISOString();
+  const baseTtl = typeof ttl_seconds === 'number' && ttl_seconds > 0 ? ttl_seconds : policy.default_ttl_seconds;
+  const adaptive = calculateAdaptiveTtlSeconds({
+    policy,
+    factTtlSeconds: baseTtl,
+    stabilityScore: typeof stability_score === 'number' ? stability_score : undefined,
+    changeTimestamps: [obsIso],
+  });
+
   const newFact: FactRecord = {
     entity_id,
     field_name,
     value,
     source: src,
-    observed_at: new Date().toISOString(),
+    observed_at: obsIso,
     version: 1,
     state: 'VALID',
-    ttl_seconds: ttl_seconds || 300,
-    field_fingerprint: crypto.createHash('sha256').update(`${entity_id}:${field_name}=${value}`).digest('hex'),
+    ttl_seconds: baseTtl,
+    tenant_id: tenantId,
+    risk_class: policy.risk_class,
+    stability_score: typeof stability_score === 'number' ? stability_score : undefined,
+    change_timestamps: [obsIso],
+    expires_at: new Date(new Date(obsIso).getTime() + adaptive.effective_ttl_seconds * 1000).toISOString(),
+    field_fingerprint: crypto.createHash('sha256').update(`${entity_id}:${field_name}=${JSON.stringify(value)}`).digest('hex'),
   };
   dbState.facts.unshift(newFact);
+  syncFactToDependencyGraph(tenantId, entity_id, field_name, 'VALID');
 
-  // Initial history record
   dbState.factHistory.unshift({
     history_id: `hist-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: tenantId,
     entity_id,
     field_name,
     version: 1,
@@ -2289,18 +3297,26 @@ app.post('/api/v1/facts', (req: Request, res: Response) => {
 });
 
 // Fact Version History
-app.get('/api/v1/facts/:entity_id/:field_name/history', (req: Request, res: Response) => {
+app.get('/api/v1/facts/history', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  res.json(dbState.factHistory.filter((h) => h.tenant_id === auth.tenantId));
+});
+
+app.get('/api/v1/facts/:entity_id/:field_name/history', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const { entity_id, field_name } = req.params;
   const history = dbState.factHistory.filter(
-    (h) => h.entity_id === entity_id && h.field_name === field_name
+    (h) => h.tenant_id === auth.tenantId && h.entity_id === entity_id && h.field_name === field_name
   );
   res.json(history);
 });
 
 // Formal Fact Correction with Provenance
-app.post('/api/v1/facts/correct', (req: Request, res: Response) => {
+app.post('/api/v1/facts/correct', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const { entity_id, field_name, corrected_value, reason, source, author } = req.body;
-  const fact = dbState.facts.find((f) => f.entity_id === entity_id && f.field_name === field_name);
+  const tenantId = auth.tenantId;
+  const fact = dbState.facts.find((f) => f.tenant_id === tenantId && f.entity_id === entity_id && f.field_name === field_name);
   if (!fact) {
     return res.status(404).json({ error: 'Fact not found to correct' });
   }
@@ -2310,10 +3326,19 @@ app.post('/api/v1/facts/correct', (req: Request, res: Response) => {
   fact.version += 1;
   fact.source = source || 'supervisor_correction';
   fact.observed_at = new Date().toISOString();
-  fact.field_fingerprint = crypto.createHash('sha256').update(`${entity_id}:${field_name}=${corrected_value}:v${fact.version}`).digest('hex');
+  fact.field_fingerprint = crypto.createHash('sha256').update(`${entity_id}:${field_name}=${JSON.stringify(corrected_value)}:v${fact.version}`).digest('hex');
+
+  const fNode = syncFactToDependencyGraph(tenantId, entity_id, field_name, 'VALID');
+  revalidateCascadeNodes({
+    nodes: dbState.dependencyNodes,
+    edges: dbState.dependencyEdges,
+    tenantId,
+    rootNodeId: fNode.node_id,
+  });
 
   dbState.factHistory.unshift({
     history_id: `hist-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: tenantId,
     entity_id,
     field_name,
     version: fact.version,
@@ -2324,7 +3349,7 @@ app.post('/api/v1/facts/correct', (req: Request, res: Response) => {
     change_type: 'CORRECTION',
     provenance: {
       system: fact.source,
-      author: author || 'supervisor',
+      author: author || auth.username || 'supervisor',
       payload_hash: crypto.createHash('sha256').update(JSON.stringify(corrected_value)).digest('hex'),
     },
     reason: reason || 'Manual supervisor correction with verified provenance',
@@ -2335,9 +3360,11 @@ app.post('/api/v1/facts/correct', (req: Request, res: Response) => {
 });
 
 // Explicit Fact Revocation
-app.post('/api/v1/facts/revoke', (req: Request, res: Response) => {
+app.post('/api/v1/facts/revoke', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const { entity_id, field_name, reason, source } = req.body;
-  const fact = dbState.facts.find((f) => f.entity_id === entity_id && f.field_name === field_name);
+  const tenantId = auth.tenantId;
+  const fact = dbState.facts.find((f) => f.tenant_id === tenantId && f.entity_id === entity_id && f.field_name === field_name);
   if (!fact) {
     return res.status(404).json({ error: 'Fact not found to revoke' });
   }
@@ -2346,9 +3373,21 @@ app.post('/api/v1/facts/revoke', (req: Request, res: Response) => {
   fact.version += 1;
   fact.observed_at = new Date().toISOString();
 
-  // Create revalidation notice
+  const fNode = syncFactToDependencyGraph(tenantId, entity_id, field_name, 'INVALIDATED');
+  const cascade = executeInvalidationCascade({
+    nodes: dbState.dependencyNodes,
+    edges: dbState.dependencyEdges,
+    cascades: dbState.invalidationCascades,
+    tenantId,
+    triggerNodeId: fNode.node_id,
+    targetState: 'INVALIDATED',
+    reason: reason || 'Authoritative fact revocation',
+    traceId: `tr-rev-${fact.version}`,
+  });
+
   const revalNotice: RevalidationNoticeRecord = {
     revalidation_id: `reval-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: tenantId,
     fact_key: `${entity_id}:${field_name}`,
     affected_receipt_ids: [],
     affected_agent_ids: ['agt-console'],
@@ -2360,6 +3399,7 @@ app.post('/api/v1/facts/revoke', (req: Request, res: Response) => {
 
   dbState.factHistory.unshift({
     history_id: `hist-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: tenantId,
     entity_id,
     field_name,
     version: fact.version,
@@ -2376,44 +3416,56 @@ app.post('/api/v1/facts/revoke', (req: Request, res: Response) => {
   });
 
   persistDatabase();
-  res.json({ status: 'revoked', fact });
+  res.json({ status: 'revoked', fact, cascade });
 });
 
 // Conflict Intelligence Endpoints
-app.get('/api/v1/conflicts', (_req: Request, res: Response) => {
-  res.json(dbState.conflicts);
+app.get('/api/v1/conflicts', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  res.json(dbState.conflicts.filter((c) => c.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/conflicts/:id/resolve', (req: Request, res: Response) => {
+app.post('/api/v1/conflicts/:id/resolve', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const { resolved_value, override_value, strategy, resolver, note, supervisor_notes } = req.body || {};
   const conflict = dbState.conflicts.find((c) => c.conflict_id === req.params.id);
   if (!conflict) {
     return res.status(404).json({ error: 'Conflict not found' });
   }
+  if (conflict.tenant_id && conflict.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant conflict resolution prohibited.' });
+  }
 
-  const finalValue = resolved_value !== undefined 
-    ? resolved_value 
+  const finalValue = resolved_value !== undefined
+    ? resolved_value
     : (override_value !== undefined ? override_value : conflict.conflicting_value);
 
   conflict.status = 'RESOLVED';
   conflict.resolution = {
     resolved_value: finalValue,
-    resolver: resolver || 'supervisor',
+    resolver: resolver || auth.username || 'supervisor',
     strategy: strategy || 'MANUAL_SUPERVISOR',
     resolved_at: new Date().toISOString(),
     note: note || supervisor_notes || 'Resolved by human supervisor after verifying authoritative system evidence',
   };
 
-  // Update fact to resolved value
-  const fact = dbState.facts.find((f) => f.entity_id === conflict.entity_id && f.field_name === conflict.field_name);
+  const fact = dbState.facts.find((f) => f.tenant_id === auth.tenantId && f.entity_id === conflict.entity_id && f.field_name === conflict.field_name);
   if (fact) {
     fact.value = finalValue;
     fact.state = 'VALID';
     fact.version += 1;
     fact.observed_at = new Date().toISOString();
+    const fNode = syncFactToDependencyGraph(auth.tenantId, fact.entity_id, fact.field_name, 'VALID');
+    revalidateCascadeNodes({
+      nodes: dbState.dependencyNodes,
+      edges: dbState.dependencyEdges,
+      tenantId: auth.tenantId,
+      rootNodeId: fNode.node_id,
+    });
 
     dbState.factHistory.unshift({
       history_id: `hist-${crypto.randomUUID().slice(0, 8)}`,
+      tenant_id: auth.tenantId,
       entity_id: fact.entity_id,
       field_name: fact.field_name,
       version: fact.version,
@@ -2424,16 +3476,15 @@ app.post('/api/v1/conflicts/:id/resolve', (req: Request, res: Response) => {
       change_type: 'CORRECTION',
       provenance: {
         system: 'conflict_resolution_engine',
-        author: resolver || 'supervisor',
+        author: resolver || auth.username || 'supervisor',
         payload_hash: crypto.createHash('sha256').update(JSON.stringify(finalValue ?? null)).digest('hex'),
       },
       reason: `Conflict ${conflict.conflict_id} resolved with strategy ${conflict.resolution.strategy}`,
     });
   }
 
-  // Dismiss matching revalidation notices
   dbState.revalidations = dbState.revalidations.map((r) => {
-    if (r.fact_key === `${conflict.entity_id}:${conflict.field_name}` || r.fact_key === `${conflict.entity_id}.${conflict.field_name}`) {
+    if ((!r.tenant_id || r.tenant_id === auth.tenantId) && (r.fact_key === `${conflict.entity_id}:${conflict.field_name}` || r.fact_key === `${conflict.entity_id}.${conflict.field_name}`)) {
       return { ...r, status: 'REVALIDATED' };
     }
     return r;
@@ -2444,32 +3495,58 @@ app.post('/api/v1/conflicts/:id/resolve', (req: Request, res: Response) => {
 });
 
 // Revalidation Notices
-app.get('/api/v1/revalidations', (_req: Request, res: Response) => {
-  res.json(dbState.revalidations);
+app.get('/api/v1/revalidations', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  res.json(dbState.revalidations.filter((r) => r.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/revalidations/:id/dismiss', (req: Request, res: Response) => {
+app.post('/api/v1/revalidations/:id/dismiss', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const item = dbState.revalidations.find((r) => r.revalidation_id === req.params.id);
-  if (item) {
-    item.status = 'REVALIDATED';
-    persistDatabase();
-    return res.json({ status: 'dismissed', item });
+  if (!item) {
+    return res.status(404).json({ error: 'Revalidation notice not found' });
   }
-  res.status(404).json({ error: 'Revalidation notice not found' });
+  if (item.tenant_id && item.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant revalidation dismissal prohibited.' });
+  }
+  item.status = 'REVALIDATED';
+  persistDatabase();
+  res.json({ status: 'dismissed', item });
 });
 
-app.post('/api/v1/facts/invalidate', (req: Request, res: Response) => {
+app.post('/api/v1/facts/invalidate', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const { entity_id, field_name, new_value, source } = req.body;
-  const fact = dbState.facts.find((f) => f.entity_id === entity_id && f.field_name === field_name);
+  const tenantId = auth.tenantId;
+  const fact = dbState.facts.find((f) => f.tenant_id === tenantId && f.entity_id === entity_id && f.field_name === field_name);
   if (fact) {
+    const prevVal = fact.value;
     fact.value = new_value || 'refunded';
     fact.state = new_value === 'paid' ? 'VALID' : 'INVALIDATED';
     fact.version += 1;
     fact.source = source || 'stripe_webhook_refund';
     fact.observed_at = new Date().toISOString();
-    fact.field_fingerprint = crypto.createHash('sha256').update(`${entity_id}:${field_name}=${fact.value}:v${fact.version}`).digest('hex');
+    fact.field_fingerprint = crypto.createHash('sha256').update(`${entity_id}:${field_name}=${JSON.stringify(fact.value)}:v${fact.version}`).digest('hex');
+    const sdiff = computeSemanticDiff({ tenant_id: tenantId, subject_id: `${entity_id}.${field_name}`, before: prevVal, after: fact.value });
+    if (sdiff.has_changes) dbState.semanticDiffs.unshift(sdiff);
+    const fNode = syncFactToDependencyGraph(tenantId, entity_id, field_name, fact.state === 'VALID' ? 'VALID' : 'INVALIDATED');
+    const cascade =
+      fact.state === 'INVALIDATED'
+        ? executeInvalidationCascade({
+            nodes: dbState.dependencyNodes,
+            edges: dbState.dependencyEdges,
+            cascades: dbState.invalidationCascades,
+            tenantId,
+            triggerNodeId: fNode.node_id,
+            targetState: 'INVALIDATED',
+            reason: `Fact invalidated (${entity_id}.${field_name}=${JSON.stringify(fact.value)})`,
+            traceId: `tr-inv-${fact.version}`,
+          })
+        : undefined;
     persistDatabase();
-    return res.json({ status: 'invalidated', fact });
+    return res.json({ status: 'invalidated', fact, cascade, semantic_diff: sdiff });
   }
 
   const created: FactRecord = {
@@ -2481,53 +3558,308 @@ app.post('/api/v1/facts/invalidate', (req: Request, res: Response) => {
     version: 2,
     state: 'INVALIDATED',
     ttl_seconds: 300,
+    tenant_id: tenantId,
     field_fingerprint: crypto.createHash('sha256').update(`${entity_id}:${field_name}=${new_value}`).digest('hex'),
   };
   dbState.facts.unshift(created);
+  const fNode = syncFactToDependencyGraph(tenantId, entity_id, field_name, 'INVALIDATED');
+  const cascade = executeInvalidationCascade({
+    nodes: dbState.dependencyNodes,
+    edges: dbState.dependencyEdges,
+    cascades: dbState.invalidationCascades,
+    tenantId,
+    triggerNodeId: fNode.node_id,
+    targetState: 'INVALIDATED',
+    reason: `Fact invalidated (${entity_id}.${field_name}=${JSON.stringify(created.value)})`,
+    traceId: `tr-inv-create`,
+  });
   persistDatabase();
-  res.json({ status: 'invalidated', fact: created });
+  res.json({ status: 'invalidated', fact: created, cascade });
 });
 
-// In-memory set for replay protection
-const processedWebhookHashes = new Set<string>();
+// Helper shared by Webhook Ingestion & Change Radar Polling/Dead-Letter Replay
+function ingestChangeRadarPayload(params: {
+  tenantId: string;
+  body: Record<string, any>;
+  defaultSource: string;
+}): {
+  httpStatus: number;
+  response: Record<string, unknown>;
+} {
+  const { tenantId, body, defaultSource } = params;
+  const { entity_id, field_name, value, source, payload, version, event_timestamp, idempotency_key, trace_id, event_type, schema_version, ttl_seconds } = body;
+  const src = String(source || defaultSource);
 
-// Webhook Event Ingestion Engine (Stripe, GitHub, Shopify, Custom Sensors)
-app.post('/api/v1/webhooks/ingest', (req: Request, res: Response) => {
-  const { entity_id, field_name, value, source, payload } = req.body;
-  if (!entity_id || !field_name) {
-    return res.status(400).json({ error: 'entity_id and field_name required' });
+  const normalized = normalizeChangeEvent({
+    tenant_id: tenantId,
+    source_id: src,
+    event_type,
+    schema_version,
+    entity_id: String(entity_id),
+    field_name: String(field_name),
+    value: value !== undefined ? value : payload?.status ?? payload?.state ?? 'received',
+    version: typeof version === 'number' ? version : undefined,
+    event_timestamp: typeof event_timestamp === 'string' ? event_timestamp : undefined,
+    trace_id: typeof trace_id === 'string' ? trace_id : undefined,
+    idempotency_key: typeof idempotency_key === 'string' ? idempotency_key : undefined,
+    raw_payload: (payload as Record<string, unknown>) || body,
+  });
+
+  // Persistent Idempotency & Duplicate Event Suppression (survives restarts!)
+  const dup = isDuplicateChangeEvent({
+    existingEvents: dbState.changeEvents,
+    tenantId,
+    idempotencyKey: normalized.idempotency_key,
+    payloadHash: normalized.payload_hash,
+  });
+  if (dup) {
+    return {
+      httpStatus: 200,
+      response: {
+        status: 'duplicate_ignored',
+        detail: 'Event with identical idempotency key or cryptographic hash already ingested. Deduplicated safely.',
+        payload_hash: normalized.payload_hash,
+        event_id: dup.event_id,
+      },
+    };
   }
 
-  const rawStr = JSON.stringify(payload || req.body);
-  const payloadHash = crypto.createHash('sha256').update(rawStr).digest('hex');
+  // Out-of-order check against current tenant fact
+  const existingFact = dbState.facts.find(
+    (f) => f.entity_id === entity_id && f.field_name === field_name && (!f.tenant_id || f.tenant_id === tenantId || tenantId === 'tenant_default')
+  );
+  if (existingFact && (typeof version === 'number' || typeof event_timestamp === 'string')) {
+    const orderRes = checkEventOrdering({
+      incomingVersion: typeof version === 'number' ? version : undefined,
+      incomingTimestamp: normalized.event_timestamp,
+      currentFactVersion: existingFact.version,
+      currentFactObservedAt: existingFact.observed_at,
+    });
+    if (!orderRes.ordered) {
+      normalized.status = 'OUT_OF_ORDER_REJECTED';
+      normalized.error_reason = orderRes.reason;
+      dbState.changeEvents.unshift(normalized);
+      persistDatabase();
+      return {
+        httpStatus: 409,
+        response: {
+          status: 'out_of_order_rejected',
+          detail: orderRes.reason,
+          event_id: normalized.event_id,
+          current_fact_version: existingFact.version,
+        },
+      };
+    }
+  }
 
-  // Replay Attack & Duplicate Ingestion Protection
-  if (processedWebhookHashes.has(payloadHash)) {
-    return res.status(200).json({
-      status: 'duplicate_ignored',
-      detail: 'Event with identical cryptographic hash already ingested. Deduplicated safely.',
-      payload_hash: payloadHash,
+  const val = normalized.new_value;
+  const isInvalidated = ['refunded', 'canceled', 'failed', 'revoked', 'expired', 'false', false].includes(val as any);
+  const evidenceId = `evi-${crypto.randomUUID().slice(0, 10)}`;
+
+  dbState.evidenceList.unshift({
+    evidence_id: evidenceId,
+    tenant_id: tenantId,
+    entity_id: String(entity_id),
+    field_name: String(field_name),
+    raw_payload: normalized.redacted_payload,
+    source: src,
+    observed_at: normalized.ingested_at,
+    payload_hash: normalized.payload_hash,
+  });
+
+  // Semantic Change Detection
+  const sdiff = computeSemanticDiff({
+    tenant_id: tenantId,
+    subject_id: `${entity_id}.${field_name}`,
+    before: existingFact ? existingFact.value : undefined,
+    after: val,
+  });
+  if (sdiff.has_changes) {
+    dbState.semanticDiffs.unshift(sdiff);
+    if (dbState.semanticDiffs.length > 200) dbState.semanticDiffs.pop();
+    normalized.semantic_diff_id = sdiff.diff_id;
+  }
+
+  const policy = selectFreshnessPolicy({
+    policies: dbState.freshnessPolicies,
+    tenantId,
+    entityId: String(entity_id),
+    fieldName: String(field_name),
+    source: src,
+  });
+  const factTtl = typeof ttl_seconds === 'number' && ttl_seconds > 0 ? ttl_seconds : existingFact?.ttl_seconds || policy.default_ttl_seconds;
+  const adaptive = calculateAdaptiveTtlSeconds({
+    policy,
+    factTtlSeconds: factTtl,
+    changeTimestamps: [normalized.ingested_at, ...(existingFact?.change_timestamps || [])],
+  });
+
+  if (existingFact) {
+    normalized.previous_value = existingFact.value;
+    existingFact.value = val;
+    existingFact.state = isInvalidated ? 'INVALIDATED' : 'VALID';
+    existingFact.version = typeof version === 'number' ? version : existingFact.version + 1;
+    existingFact.source = src;
+    existingFact.tenant_id = existingFact.tenant_id || tenantId;
+    existingFact.evidence_id = evidenceId;
+    existingFact.observed_at = normalized.ingested_at;
+    existingFact.ttl_seconds = factTtl;
+    existingFact.change_timestamps = [normalized.ingested_at, ...(existingFact.change_timestamps || [])].slice(0, 20);
+    existingFact.expires_at = new Date(Date.now() + adaptive.effective_ttl_seconds * 1000).toISOString();
+    existingFact.field_fingerprint = crypto.createHash('sha256').update(`${entity_id}:${field_name}=${JSON.stringify(val)}:v${existingFact.version}`).digest('hex');
+  } else {
+    dbState.facts.unshift({
+      entity_id: String(entity_id),
+      field_name: String(field_name),
+      value: val,
+      source: src,
+      observed_at: normalized.ingested_at,
+      version: typeof version === 'number' ? version : 1,
+      state: isInvalidated ? 'INVALIDATED' : 'VALID',
+      evidence_id: evidenceId,
+      ttl_seconds: factTtl,
+      tenant_id: tenantId,
+      risk_class: policy.risk_class,
+      change_timestamps: [normalized.ingested_at],
+      expires_at: new Date(Date.now() + adaptive.effective_ttl_seconds * 1000).toISOString(),
+      field_fingerprint: crypto.createHash('sha256').update(`${entity_id}:${field_name}=${JSON.stringify(val)}`).digest('hex'),
     });
   }
 
-  // Webhook Signature Verification (Cryptographically Hardened: Zero Backdoors)
+  // Dependency Cascade propagation
+  const factNode = syncFactToDependencyGraph(tenantId, String(entity_id), String(field_name), isInvalidated ? 'INVALIDATED' : 'VALID');
+  let cascade: InvalidationCascadeRecord | undefined;
+  if (isInvalidated || (existingFact && sdiff.requires_invalidation)) {
+    cascade = executeInvalidationCascade({
+      nodes: dbState.dependencyNodes,
+      edges: dbState.dependencyEdges,
+      cascades: dbState.invalidationCascades,
+      tenantId,
+      triggerNodeId: factNode.node_id,
+      targetState: isInvalidated ? 'INVALIDATED' : 'REVALIDATE_REQUIRED',
+      reason: isInvalidated ? `Invalidation event from ${src}: ${sdiff.summary}` : sdiff.summary,
+      traceId: normalized.trace_id,
+      idempotencyKey: `casc-${normalized.event_id}`,
+    });
+    normalized.cascade_id = cascade.cascade_id;
+  }
+
+  dbState.changeEvents.unshift(normalized);
+  if (dbState.changeEvents.length > 500) dbState.changeEvents.pop();
+
+  recordAuditEntry(
+    `wh-${evidenceId}`,
+    src,
+    isInvalidated ? 'BLOCK' : 'ALLOW',
+    isInvalidated ? 0.8 : 0.1,
+    `Webhook/Radar ingested for ${entity_id}.${field_name} = ${JSON.stringify(redactSensitiveDiffValue(val))} (State: ${isInvalidated ? 'INVALIDATED' : 'VALID'}, Diff: ${sdiff.classification})`,
+    'INGESTED_VIA_WEBHOOK',
+    false,
+    tenantId
+  );
+
+  persistDatabase();
+  return {
+    httpStatus: 200,
+    response: {
+      status: 'success',
+      evidence_id: evidenceId,
+      event_id: normalized.event_id,
+      trace_id: normalized.trace_id,
+      entity_id,
+      field_name,
+      value: redactSensitiveDiffValue(val),
+      fact_state: isInvalidated ? 'INVALIDATED' : 'VALID',
+      payload_hash: normalized.payload_hash,
+      semantic_diff: sdiff,
+      cascade,
+    },
+  };
+}
+
+// Webhook Event Ingestion Engine (Stripe, GitHub, Shopify, Custom Sensors + Live Change Radar)
+app.post('/api/v1/webhooks/ingest', (req: Request, res: Response) => {
+  const { entity_id, field_name, source, payload } = req.body || {};
   const signatureHeader = (req.headers['x-cck-signature'] as string) || (req.headers['x-hub-signature-256'] as string);
+  const authHeader = (req.headers['authorization'] as string) || '';
+  const apiKeyHeader = (req.headers['x-api-key'] as string) || '';
+  const hasAuthToken = Boolean((authHeader.startsWith('Bearer ') && authHeader.slice(7).trim()) || apiKeyHeader.trim());
+
+  let tenantId = '';
+  let hmacVerified = false;
+
+  if (hasAuthToken) {
+    const authRes = resolveAuthContext(req);
+    if (!authRes.ok) {
+      return res.status(authRes.status).json({ error: authRes.error, detail: authRes.detail });
+    }
+    const mismatch = enforceTenantBodyMatch(req, authRes.ctx);
+    if (mismatch) {
+      return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+    }
+    tenantId = authRes.ctx.tenantId;
+  }
+
   if (signatureHeader) {
+    const rawStr = JSON.stringify(payload || req.body || {});
     const secret = process.env.CCK_WEBHOOK_SECRET || 'cck_whsec_live_default';
     const expectedSig = crypto.createHmac('sha256', secret).update(rawStr).digest('hex');
     const providedSig = signatureHeader.replace(/^sha256=/, '');
-
-    // Constant-time comparison to prevent side-channel timing attacks
     const expectedBuf = Buffer.from(expectedSig, 'utf8');
     const providedBuf = Buffer.from(providedSig, 'utf8');
     const isValid = expectedBuf.length === providedBuf.length && crypto.timingSafeEqual(expectedBuf, providedBuf);
 
     if (!isValid) {
+      const dlq = createFailedChangeEvent({
+        tenantId: tenantId || 'unauthenticated',
+        sourceId: String(source || 'external_webhook'),
+        rawPayload: (req.body as Record<string, unknown>) || {},
+        errorCode: 'INVALID_SIGNATURE',
+        errorMessage: 'HMAC-SHA256 webhook signature verification failed.',
+      });
+      dbState.failedChangeEvents.unshift(dlq);
+      persistDatabase();
       return res.status(401).json({
         error: 'INVALID_SIGNATURE',
         detail: 'HMAC-SHA256 webhook signature verification failed.',
+        dead_letter_id: dlq.dead_letter_id,
       });
     }
+    hmacVerified = true;
+    if (!tenantId) {
+      tenantId = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+    }
+  }
+
+  // Fail closed: require either valid Bearer/API-key auth OR valid HMAC signature
+  if (!hasAuthToken && !hmacVerified) {
+    return res.status(401).json({
+      error: 'UNAUTHORIZED',
+      detail: 'Webhook ingestion requires a valid Bearer session/API key or signed X-CCK-Signature HMAC.',
+    });
+  }
+
+  const srcKey = String(source || req.headers['user-agent'] || 'external_webhook');
+  const rl = checkRadarRateLimit({ tenantId, sourceId: srcKey, maxPerMinute: 240 });
+  if (!rl.allowed) {
+    return res.status(429).json({
+      error: 'RADAR_RATE_LIMIT_EXCEEDED',
+      detail: `Change Radar rate limit exceeded for source "${srcKey}".`,
+      retry_after_seconds: rl.retryAfterSeconds,
+    });
+  }
+
+  if (!entity_id || !field_name) {
+    const dlq = createFailedChangeEvent({
+      tenantId,
+      sourceId: srcKey,
+      rawPayload: (req.body as Record<string, unknown>) || {},
+      errorCode: 'MISSING_ENTITY_OR_FIELD',
+      errorMessage: 'entity_id and field_name required',
+    });
+    dbState.failedChangeEvents.unshift(dlq);
+    persistDatabase();
+    return res.status(400).json({ error: 'entity_id and field_name required', dead_letter_id: dlq.dead_letter_id });
   }
 
   // Webhook Timestamp Replay Protection
@@ -2536,97 +3868,47 @@ app.post('/api/v1/webhooks/ingest', (req: Request, res: Response) => {
     const reqTimestamp = parseInt(timestampHeader, 10);
     const nowSec = Math.floor(Date.now() / 1000);
     if (isNaN(reqTimestamp) || Math.abs(nowSec - reqTimestamp) > 300) {
+      const dlq = createFailedChangeEvent({
+        tenantId,
+        sourceId: srcKey,
+        rawPayload: (req.body as Record<string, unknown>) || {},
+        errorCode: 'EXPIRED_TIMESTAMP',
+        errorMessage: 'Webhook timestamp exceeds 300-second freshness window.',
+      });
+      dbState.failedChangeEvents.unshift(dlq);
+      persistDatabase();
       return res.status(401).json({
         error: 'EXPIRED_TIMESTAMP',
         detail: 'Webhook timestamp exceeds 300-second freshness window.',
+        dead_letter_id: dlq.dead_letter_id,
       });
     }
   }
 
-  processedWebhookHashes.add(payloadHash);
-  if (processedWebhookHashes.size > 10000) {
-    // Keep size bounded
-    const [first] = processedWebhookHashes;
-    processedWebhookHashes.delete(first);
-  }
-
-  const val = value !== undefined ? value : payload?.status || payload?.state || 'received';
-  const src = source || req.headers['user-agent'] || 'external_webhook';
-  const isInvalidated = ['refunded', 'canceled', 'failed', 'revoked', 'expired', 'false', false].includes(val);
-
-  // Mint cryptographic evidence
-  const evidenceId = `evi-${crypto.randomUUID().slice(0, 10)}`;
-
-  const evidence: EvidenceRecord = {
-    evidence_id: evidenceId,
-    entity_id,
-    field_name,
-    raw_payload: payload || req.body,
-    source: src,
-    observed_at: new Date().toISOString(),
-    payload_hash: payloadHash,
-  };
-  dbState.evidenceList.unshift(evidence);
-
-  // Update or insert fact
-  const fact = dbState.facts.find((f) => f.entity_id === entity_id && f.field_name === field_name);
-  if (fact) {
-    fact.value = val;
-    fact.state = isInvalidated ? 'INVALIDATED' : 'VALID';
-    fact.version += 1;
-    fact.source = src;
-    fact.evidence_id = evidenceId;
-    fact.observed_at = new Date().toISOString();
-    fact.field_fingerprint = crypto.createHash('sha256').update(`${entity_id}:${field_name}=${val}:v${fact.version}`).digest('hex');
-  } else {
-    dbState.facts.unshift({
-      entity_id,
-      field_name,
-      value: val,
-      source: src,
-      observed_at: new Date().toISOString(),
-      version: 1,
-      state: isInvalidated ? 'INVALIDATED' : 'VALID',
-      evidence_id: evidenceId,
-      ttl_seconds: 300,
-      field_fingerprint: crypto.createHash('sha256').update(`${entity_id}:${field_name}=${val}`).digest('hex'),
-    });
-  }
-
-  // Record audit event
-  recordAuditEntry(
-    `wh-${evidenceId}`,
-    src,
-    isInvalidated ? 'BLOCK' : 'ALLOW',
-    isInvalidated ? 0.8 : 0.1,
-    `Webhook ingested for ${entity_id}.${field_name} = ${JSON.stringify(val)} (State: ${isInvalidated ? 'INVALIDATED' : 'VALID'})`,
-    'INGESTED_VIA_WEBHOOK'
-  );
-
-  persistDatabase();
-
-  res.json({
-    status: 'success',
-    evidence_id: evidenceId,
-    entity_id,
-    field_name,
-    value: val,
-    fact_state: isInvalidated ? 'INVALIDATED' : 'VALID',
-    payload_hash: payloadHash,
+  const { httpStatus, response } = ingestChangeRadarPayload({
+    tenantId,
+    body: req.body,
+    defaultSource: srcKey,
   });
+  res.status(httpStatus).json(response);
 });
 
 // Evidence Registry
-app.get('/api/v1/evidence', (_req: Request, res: Response) => {
-  res.json(dbState.evidenceList);
+app.get('/api/v1/evidence', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  res.json(dbState.evidenceList.filter((e) => e.tenant_id === auth.tenantId || e.metadata?.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/evidence', (req: Request, res: Response) => {
+app.post('/api/v1/evidence', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const { entity_id, field_name, raw_payload, source } = req.body;
   const rawStr = JSON.stringify(raw_payload || {});
   const payloadHash = crypto.createHash('sha256').update(rawStr).digest('hex');
   const record: EvidenceRecord = {
     evidence_id: `evi-${crypto.randomUUID().slice(0, 10)}`,
+    tenant_id: auth.tenantId,
     entity_id,
     field_name,
     raw_payload: raw_payload || {},
@@ -2640,18 +3922,30 @@ app.post('/api/v1/evidence', (req: Request, res: Response) => {
 });
 
 // Dependencies Graph
-app.get('/api/v1/dependencies', (req: Request, res: Response) => {
+app.get('/api/v1/dependencies', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const projId = req.query.project_id as string;
+  let list = dbState.dependencies.filter((d) => d.tenant_id === auth.tenantId);
   if (projId) {
-    return res.json(dbState.dependencies.filter((d) => d.project_id === projId));
+    list = list.filter((d) => d.project_id === projId);
   }
-  res.json(dbState.dependencies);
+  res.json(list);
 });
 
-app.post('/api/v1/dependencies', (req: Request, res: Response) => {
+app.post('/api/v1/dependencies', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const { project_id, action_capability, required_fact_entity, required_fact_field, max_age_seconds } = req.body;
+  if (project_id) {
+    const p = dbState.projects.find((pr) => pr.project_id === project_id);
+    if (p && p.tenant_id !== auth.tenantId) {
+      return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant project dependency forbidden.' });
+    }
+  }
   const dep: DependencyRecord = {
     dep_id: `dep-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: auth.tenantId,
     project_id: project_id || 'proj-default',
     action_capability,
     required_fact_entity,
@@ -2664,14 +3958,19 @@ app.post('/api/v1/dependencies', (req: Request, res: Response) => {
   res.json(dep);
 });
 
-app.delete('/api/v1/dependencies/:id', (req: Request, res: Response) => {
-  const idx = dbState.dependencies.findIndex((d) => d.dep_id === req.params.id);
-  if (idx !== -1) {
-    dbState.dependencies.splice(idx, 1);
-    persistDatabase();
-    return res.json({ status: 'deleted', dep_id: req.params.id });
+app.delete('/api/v1/dependencies/:id', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const dep = dbState.dependencies.find((d) => d.dep_id === req.params.id);
+  if (!dep) {
+    return res.status(404).json({ detail: 'Dependency not found' });
   }
-  res.status(404).json({ detail: 'Dependency not found' });
+  if (dep.tenant_id && dep.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant dependency deletion prohibited.' });
+  }
+  const idx = dbState.dependencies.indexOf(dep);
+  dbState.dependencies.splice(idx, 1);
+  persistDatabase();
+  return res.json({ status: 'deleted', dep_id: req.params.id });
 });
 
 // -------------------------------------------------------------
@@ -2813,12 +4112,16 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     // 0. Idempotency & Duplicate Request Protection
     if (body.idempotency_key) {
       const existingExec = dbState.contractExecutions.find(
-        (e) => e.idempotency_key === body.idempotency_key
+        (e) =>
+          e.idempotency_key === body.idempotency_key &&
+          (!e.tenant_id || !callerTenant || e.tenant_id === callerTenant)
       );
       if (existingExec) {
         if (existingExec.state === 'SUCCEEDED') {
           const cachedReceipt = dbState.receipts.find(
-            (r) => r.receipt_id === existingExec.result_evidence?.receipt_id
+            (r) =>
+              r.receipt_id === existingExec.result_evidence?.receipt_id &&
+              (!r.tenant_id || !callerTenant || r.tenant_id === callerTenant)
           );
           return {
             status: 200,
@@ -2991,75 +4294,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
       };
     }
 
-    // 1. Check for Precondition Fact Drift
-    const matchedDep =
-      dbState.dependencies.find(
-        (d) =>
-          (capability.startsWith(d.action_capability.replace('*', '')) || d.action_capability === '*') &&
-          (d.required_fact_entity === effectiveEntity || d.required_fact_entity === '*')
-      ) ||
-      dbState.dependencies.find(
-        (d) => capability.startsWith(d.action_capability.replace('*', '')) || d.action_capability === '*'
-      );
-
-    if (matchedDep) {
-      const requiredFact =
-        dbState.facts.find((f) => f.entity_id === effectiveEntity && f.field_name === matchedDep.required_fact_field) ||
-        dbState.facts.find((f) => f.entity_id === matchedDep.required_fact_entity && f.field_name === matchedDep.required_fact_field);
-
-      const isDrifted = !requiredFact || 
-        requiredFact.state === 'INVALIDATED' || 
-        requiredFact.state === 'STALE' ||
-        requiredFact.value === 'refunded' || 
-        requiredFact.value === 0 || 
-        requiredFact.value === 'revoked' || 
-        requiredFact.value === 'disputed';
-
-      if (isDrifted) {
-        const reason = `Action BLOCKED: Required fact ${matchedDep.required_fact_entity}.${matchedDep.required_fact_field} is INVALIDATED or stale (current value: ${
-          requiredFact?.value !== undefined ? JSON.stringify(requiredFact.value) : 'MISSING'
-        }). Precondition drift detected. Zero mutations dispatched to external target.`;
-
-        trackAgentStats('BLOCK');
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 0.95, reason, 'BLOCKED_BY_PRECONDITION', false, callerTenant || undefined);
-        const receipt = mintDecisionReceipt({
-          actionId,
-          agentId,
-          entityId: matchedDep.required_fact_entity,
-          capability,
-          target,
-          command: command || '',
-          severity: severity || 'MUTATION',
-          tenantId: callerTenant || undefined,
-          verdict: {
-            decision: 'BLOCK',
-            risk_score: 0.95,
-            reasoning: reason,
-            remediation_suggestions: ['Re-query fresh entity evidence before attempting mutation dispatch.'],
-          },
-          matchedPolicies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
-          auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
-          driftDetected: true,
-        });
-
-        return {
-          status: 200,
-          result: decorateResult({
-            action_id: actionId,
-            decision: 'BLOCK',
-            risk_score: 0.95,
-            reason,
-            receipt_id: receipt.receipt_id,
-            receipt,
-            matched_policies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
-            remediation_suggestions: ['Re-query payment and order status before executing courier dispatch.'],
-            shadow_mode_active: Boolean(shadow_mode),
-          }),
-        };
-      }
-    }
-
-    // 2. Destructive Command & Injection Detection
+    // 0.9 Destructive Command & Injection Detection (Highest security priority)
     const destructivePatterns = [
       'rm -rf /',
       'mkfs',
@@ -3111,9 +4346,395 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
       };
     }
 
+    // 1. Check for Precondition Fact Drift & Adaptive Freshness (Feature 1)
+    const depMatchesTenant = (d: DependencyRecord) =>
+      !callerTenant ? true : !d.tenant_id || d.tenant_id === callerTenant || d.tenant_id === 'tenant_default';
+    const matchedDep =
+      dbState.dependencies.find(
+        (d) =>
+          depMatchesTenant(d) &&
+          (capability.startsWith(d.action_capability.replace('*', '')) || d.action_capability === '*') &&
+          (d.required_fact_entity === effectiveEntity || d.required_fact_entity === '*')
+      ) ||
+      dbState.dependencies.find(
+        (d) =>
+          depMatchesTenant(d) &&
+          (capability.startsWith(d.action_capability.replace('*', '')) || d.action_capability === '*')
+      );
+
+    if (matchedDep) {
+      const matchesTenant = (f: FactRecord) =>
+        !callerTenant ? true : f.tenant_id === callerTenant || !f.tenant_id || f.tenant_id === 'tenant_default';
+      const requiredFact =
+        dbState.facts.find((f) => f.tenant_id === callerTenant && f.entity_id === effectiveEntity && f.field_name === matchedDep.required_fact_field) ||
+        dbState.facts.find((f) => matchesTenant(f) && f.entity_id === effectiveEntity && f.field_name === matchedDep.required_fact_field) ||
+        dbState.facts.find((f) => matchesTenant(f) && f.entity_id === matchedDep.required_fact_entity && f.field_name === matchedDep.required_fact_field);
+
+      const isExplicitlyInvalidated = !requiredFact || 
+        requiredFact.state === 'INVALIDATED' || 
+        requiredFact.state === 'REVOKED' ||
+        requiredFact.state === 'CONFLICT' ||
+        requiredFact.value === 'refunded' || 
+        requiredFact.value === 0 || 
+        requiredFact.value === 'revoked' || 
+        requiredFact.value === 'disputed';
+
+      if (isExplicitlyInvalidated) {
+        const reason = `Action BLOCKED: Required fact ${matchedDep.required_fact_entity}.${matchedDep.required_fact_field} is INVALIDATED or stale (current value: ${
+          requiredFact?.value !== undefined ? JSON.stringify(requiredFact.value) : 'MISSING'
+        }). Precondition drift detected. Zero mutations dispatched to external target.`;
+
+        trackAgentStats('BLOCK');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 0.95, reason, 'BLOCKED_BY_PRECONDITION', false, callerTenant || undefined);
+        const receipt = mintDecisionReceipt({
+          actionId,
+          agentId,
+          entityId: matchedDep.required_fact_entity,
+          capability,
+          target,
+          command: command || '',
+          severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
+          verdict: {
+            decision: 'BLOCK',
+            risk_score: 0.95,
+            reasoning: reason,
+            remediation_suggestions: ['Re-query fresh entity evidence before attempting mutation dispatch.'],
+          },
+          matchedPolicies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
+          auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+          driftDetected: true,
+        });
+
+        return {
+          status: 200,
+          result: decorateResult({
+            action_id: actionId,
+            decision: 'BLOCK',
+            risk_score: 0.95,
+            reason,
+            receipt_id: receipt.receipt_id,
+            receipt,
+            matched_policies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
+            remediation_suggestions: ['Re-query payment and order status before executing courier dispatch.'],
+            shadow_mode_active: Boolean(shadow_mode),
+          }),
+        };
+      }
+
+      // Runtime Adaptive Freshness check against TTL / policy
+      const depEffectiveTtl =
+        matchedDep.max_age_seconds > 0
+          ? Math.min(requiredFact.ttl_seconds || matchedDep.max_age_seconds, matchedDep.max_age_seconds)
+          : requiredFact.ttl_seconds;
+      const freshnessRes = evaluateFactFreshness({
+        fact: { ...requiredFact, ttl_seconds: depEffectiveTtl },
+        entityId: requiredFact.entity_id,
+        fieldName: requiredFact.field_name,
+        tenantId: callerTenant || 'tenant_default',
+        policies: dbState.freshnessPolicies,
+      });
+
+      if (freshnessRes.freshness_status !== 'FRESH') {
+        const verdictDecision = freshnessRes.recommended_action;
+        const risk = verdictDecision === 'BLOCK' ? 0.9 : 0.65;
+        trackAgentStats(verdictDecision);
+        const audit = recordAuditEntry(actionId, agentId, verdictDecision, risk, freshnessRes.explanation, 'FRESHNESS_CHECK_FAILED', false, callerTenant || undefined);
+        const receipt = mintDecisionReceipt({
+          actionId,
+          agentId,
+          entityId: requiredFact.entity_id,
+          capability,
+          target,
+          command: command || '',
+          severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
+          verdict: {
+            decision: verdictDecision,
+            risk_score: risk,
+            reasoning: freshnessRes.explanation,
+            remediation_suggestions: ['Refresh fact observation from authoritative source before retrying action.'],
+          },
+          matchedPolicies: [{ rule_id: freshnessRes.policy_id, name: 'Adaptive Fact Freshness Engine' }],
+          auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+          driftDetected: true,
+        });
+        return {
+          status: 200,
+          result: decorateResult({
+            action_id: actionId,
+            decision: verdictDecision,
+            risk_score: risk,
+            reason: freshnessRes.explanation,
+            receipt_id: receipt.receipt_id,
+            receipt,
+            freshness_evaluation: freshnessRes,
+            matched_policies: [{ rule_id: freshnessRes.policy_id, name: 'Adaptive Fact Freshness Engine' }],
+            shadow_mode_active: Boolean(shadow_mode),
+          }),
+        };
+      }
+    }
+
+    // 1.5 Impact & Invalidation Cascade Check (Feature 4)
+    const cascadeBlock = checkProtectedActionCascadeBlock({
+      nodes: dbState.dependencyNodes,
+      edges: dbState.dependencyEdges,
+      tenantId: callerTenant || 'tenant_default',
+      capability,
+      entityId: body.entity_id || undefined,
+      toolId: body.tool_id || body.parameters?.tool_id,
+      contractId: body.contract_id,
+    });
+    if (cascadeBlock.blocked || cascadeBlock.requiresRevalidation) {
+      const dec = cascadeBlock.blocked ? 'BLOCK' : 'REVALIDATE';
+      const risk = dec === 'BLOCK' ? 0.95 : 0.7;
+      trackAgentStats(dec);
+      const audit = recordAuditEntry(actionId, agentId, dec, risk, cascadeBlock.reason || 'Cascade triggered', 'BLOCKED_BY_CASCADE', false, callerTenant || undefined);
+      const receipt = mintDecisionReceipt({
+        actionId,
+        agentId,
+        entityId: effectiveEntity,
+        capability,
+        target,
+        command: command || '',
+        severity: severity || 'MUTATION',
+        tenantId: callerTenant || undefined,
+        verdict: { decision: dec, risk_score: risk, reasoning: cascadeBlock.reason || 'Invalidation cascade affected upstream dependency.' },
+        matchedPolicies: [{ rule_id: 'POL-REL-CASCADE-001', name: 'Dependency Invalidation Cascade Guard' }],
+        auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+        driftDetected: true,
+      });
+      return {
+        status: 200,
+        result: decorateResult({
+          action_id: actionId,
+          decision: dec,
+          risk_score: risk,
+          reason: cascadeBlock.reason,
+          receipt_id: receipt.receipt_id,
+          receipt,
+          blocking_dependencies: cascadeBlock.blockingNodes.map((n) => ({ node_id: n.node_id, type: n.node_type, ref_id: n.ref_id, state: n.state })),
+          matched_policies: [{ rule_id: 'POL-REL-CASCADE-001', name: 'Dependency Invalidation Cascade Guard' }],
+          shadow_mode_active: Boolean(shadow_mode),
+        }),
+      };
+    }
+
+    // 1.55 Multi-Source Conflict Resolver Gate (Batch 2 Feature 5)
+    const gateTenant = callerTenant || 'tenant_default';
+    if (body.entity_id && (body.required_fact_field || body.field_name)) {
+      const checkField = String(body.required_fact_field || body.field_name);
+      const hasMultiObs = dbState.factObservations.some(
+        (o) => o.tenant_id === gateTenant && o.entity_id === String(body.entity_id) && o.field_name === checkField
+      );
+      if (hasMultiObs) {
+        const conflictEval = evaluateMultiSourceConflict({
+          observations: dbState.factObservations,
+          policies: dbState.conflictPolicies,
+          tenantId: gateTenant,
+          entityId: String(body.entity_id),
+          fieldName: checkField,
+        });
+        if (conflictEval.recommended_action !== 'ALLOW') {
+          const dec = conflictEval.recommended_action;
+          const risk = dec === 'BLOCK' ? 0.95 : 0.72;
+          trackAgentStats(dec);
+          const audit = recordAuditEntry(actionId, agentId, dec, risk, conflictEval.explanation, 'BLOCKED_BY_CONFLICT_RESOLVER', false, gateTenant);
+          const receipt = mintDecisionReceipt({
+            actionId,
+            agentId,
+            entityId: String(body.entity_id),
+            capability,
+            target,
+            command: command || '',
+            severity: severity || 'MUTATION',
+            tenantId: gateTenant,
+            verdict: { decision: dec, risk_score: risk, reasoning: conflictEval.explanation },
+            matchedPolicies: [{ rule_id: conflictEval.policy_id, name: 'Multi-Source Conflict Resolver' }],
+            auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+            driftDetected: true,
+          });
+          return {
+            status: 200,
+            result: decorateResult({
+              action_id: actionId,
+              decision: dec,
+              risk_score: risk,
+              reason: conflictEval.explanation,
+              receipt_id: receipt.receipt_id,
+              receipt,
+              conflict_evaluation: conflictEval,
+              matched_policies: [{ rule_id: conflictEval.policy_id, name: 'Multi-Source Conflict Resolver' }],
+              shadow_mode_active: Boolean(shadow_mode),
+            }),
+          };
+        }
+      }
+    }
+
+    // 1.58 Data Flow & Leakage Guard Check (Batch 2 Feature 15) when tenant flow policies or explicit labels exist
+    if (
+      dbState.dataFlowPolicies.some((p) => p.is_active && p.tenant_id === gateTenant) &&
+      body.parameters &&
+      typeof body.parameters === 'object'
+    ) {
+      const dfRes = evaluateDataFlowGuard({
+        tenantId: gateTenant,
+        destination: target,
+        payload: body.parameters as Record<string, unknown>,
+        classifications: dbState.dataClassifications,
+        policies: dbState.dataFlowPolicies,
+      });
+      if (dfRes.decision === 'BLOCK') {
+        trackAgentStats('BLOCK');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, dfRes.reason, 'BLOCKED_BY_DATA_FLOW_GUARD', false, gateTenant);
+        const receipt = mintDecisionReceipt({
+          actionId,
+          agentId,
+          entityId: effectiveEntity,
+          capability,
+          target,
+          command: command || '',
+          severity: severity || 'SECURITY_VIOLATION',
+          tenantId: gateTenant,
+          verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: dfRes.reason },
+          matchedPolicies: [{ rule_id: 'POL-DATA-FLOW-001', name: 'Data Flow & Leakage Guard' }],
+          auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+        });
+        return {
+          status: 200,
+          result: decorateResult({
+            action_id: actionId,
+            decision: 'BLOCK',
+            risk_score: 1.0,
+            reason: dfRes.reason,
+            receipt_id: receipt.receipt_id,
+            receipt,
+            data_flow_evaluation: {
+              ...dfRes,
+              sanitized_payload: {},
+            },
+            matched_policies: [{ rule_id: 'POL-DATA-FLOW-001', name: 'Data Flow & Leakage Guard' }],
+            shadow_mode_active: Boolean(shadow_mode),
+          }),
+        };
+      }
+    }
+
+    // 1.6 Tool Identity Fingerprint & Drift Policy (Features 9 & 10)
+    const gateToolId = body.tool_id || body.parameters?.tool_id || body.tool_name || body.parameters?.tool_name;
+    if (gateToolId) {
+      const matchedToolIdentity = dbState.toolIdentities.find(
+        (t) => (t.tenant_id === (callerTenant || 'tenant_default')) && (t.tool_id === gateToolId || t.name === gateToolId)
+      );
+      if (matchedToolIdentity) {
+        const driftEval = evaluateToolDriftPolicy({
+          identity: matchedToolIdentity,
+          drifts: dbState.toolDrifts,
+          requestedScope: body.requested_scope || capability,
+        });
+        if (driftEval.decision !== 'ALLOW') {
+          const dec = driftEval.decision;
+          const risk = dec === 'BLOCK' ? 0.95 : 0.7;
+          trackAgentStats(dec);
+          const audit = recordAuditEntry(actionId, agentId, dec, risk, driftEval.reason, 'BLOCKED_BY_TOOL_DRIFT', false, callerTenant || undefined);
+          const receipt = mintDecisionReceipt({
+            actionId,
+            agentId,
+            entityId: effectiveEntity,
+            capability,
+            target,
+            command: command || '',
+            severity: severity || 'MUTATION',
+            tenantId: callerTenant || undefined,
+            verdict: { decision: dec, risk_score: risk, reasoning: driftEval.reason },
+            matchedPolicies: [{ rule_id: 'POL-TOOL-DRIFT-001', name: 'Tool Identity & Drift Intelligence' }],
+            auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+          });
+          return {
+            status: 200,
+            result: decorateResult({
+              action_id: actionId,
+              decision: dec,
+              risk_score: risk,
+              reason: driftEval.reason,
+              receipt_id: receipt.receipt_id,
+              receipt,
+              tool_drift_finding: driftEval.finding,
+              matched_policies: [{ rule_id: 'POL-TOOL-DRIFT-001', name: 'Tool Identity & Drift Intelligence' }],
+              shadow_mode_active: Boolean(shadow_mode),
+            }),
+          };
+        }
+      }
+    }
+
+    // 1.7 Permission Graph & Least Privilege Check (Feature 11)
+    if (!body.skip_gateway_perm_recheck) {
+      const effTenant = callerTenant || 'tenant_default';
+      const toolIdentity = gateToolId
+        ? dbState.toolIdentities.find((t) => t.tenant_id === effTenant && (t.tool_id === gateToolId || t.name === gateToolId))
+        : undefined;
+      const boundDel = body.delegation_id
+        ? dbState.delegations.find(
+            (d) => d.delegation_id === body.delegation_id && (!d.tenant_id || !callerTenant || d.tenant_id === callerTenant)
+          ) || null
+        : null;
+      const permEval = evaluatePermissionGraph({
+        tenantId: effTenant,
+        agentId,
+        toolId: gateToolId || capability,
+        resource: target,
+        action: capability,
+        requestedScopes: Array.isArray(body.requested_scopes) ? body.requested_scopes : undefined,
+        grants: dbState.permissionGrants,
+        toolIdentity,
+        delegation: boundDel,
+        strictNoImplicitAllow: Boolean(body.strict_permissions),
+      });
+      if (!permEval.allowed) {
+        trackAgentStats('BLOCK');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 0.95, permEval.reason, 'BLOCKED_BY_PERMISSION_GRAPH', false, callerTenant || undefined);
+        const receipt = mintDecisionReceipt({
+          actionId,
+          agentId,
+          entityId: effectiveEntity,
+          capability,
+          target,
+          command: command || '',
+          severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
+          verdict: { decision: 'BLOCK', risk_score: 0.95, reasoning: permEval.reason },
+          matchedPolicies: [{ rule_id: 'POL-PERM-GRAPH-001', name: 'Least Privilege Permission Graph' }],
+          auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
+        });
+        return {
+          status: 200,
+          result: decorateResult({
+            action_id: actionId,
+            decision: 'BLOCK',
+            risk_score: 0.95,
+            reason: permEval.reason,
+            receipt_id: receipt.receipt_id,
+            receipt,
+            permission_evaluation: permEval,
+            matched_policies: [{ rule_id: 'POL-PERM-GRAPH-001', name: 'Least Privilege Permission Graph' }],
+            shadow_mode_active: Boolean(shadow_mode),
+          }),
+        };
+      }
+    }
+
+    // Security guard moved above Step 1 so catastrophic commands always evaluate POL-SEC-001 (risk 1.0) first.
+
     // 2.5 Invariants & Delegated Authority Verification (Mandate OS + INVARIANT)
     const skillId = body.skill_id || body.parameters?.skill_id;
-    const skill = skillId ? dbState.skills.find((s) => s.skill_id === skillId) : null;
+    const skill = skillId
+      ? dbState.skills.find(
+          (s) => s.skill_id === skillId && (!s.tenant_id || !callerTenant || s.tenant_id === callerTenant)
+        )
+      : null;
     if (skillId && !skill) {
       const reason = `Action BLOCKED: Skill "${skillId}" is not registered in CCK Skill Registry. Invariant INV_AUTHORIZED_SKILLS_ONLY strictly enforced.`;
       trackAgentStats('BLOCK');
@@ -3147,8 +4768,18 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     }
 
     const mandate = body.mandate_id
-      ? dbState.mandates.find((m) => m.mandate_id === body.mandate_id && m.status === 'ACTIVE')
-      : dbState.mandates.find((m) => m.agent_id === agentId && m.status === 'ACTIVE') || null;
+      ? dbState.mandates.find(
+          (m) =>
+            m.mandate_id === body.mandate_id &&
+            m.status === 'ACTIVE' &&
+            (!m.tenant_id || !callerTenant || m.tenant_id === callerTenant)
+        )
+      : dbState.mandates.find(
+          (m) =>
+            m.agent_id === agentId &&
+            m.status === 'ACTIVE' &&
+            (!m.tenant_id || !callerTenant || m.tenant_id === callerTenant)
+        ) || null;
     const invResult = evaluateBusinessInvariants({
       capability,
       target,
@@ -3194,10 +4825,12 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
     // 2.6 Verified Action Contract Checks (EFFECT)
     if (body.contract_id) {
-      const contract = dbState.contracts.find((c) => c.contract_id === body.contract_id);
+      const contract = dbState.contracts.find(
+        (c) => c.contract_id === body.contract_id && (!c.tenant_id || !callerTenant || c.tenant_id === callerTenant)
+      );
       if (!contract) {
         const reason = `Action BLOCKED: Action Contract ${body.contract_id} not found.`;
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_CONTRACT');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_CONTRACT', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -3206,6 +4839,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
           matchedPolicies: [{ rule_id: 'POL-CONTRACT-001', name: 'Contract Validity Guard' }],
           auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3227,7 +4861,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
       if (contract.status !== 'ACTIVE') {
         const reason = `Action BLOCKED: Action Contract ${contract.contract_id} is ${contract.status}.`;
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_CONTRACT');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_CONTRACT', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -3236,6 +4870,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
           matchedPolicies: [{ rule_id: 'POL-CONTRACT-STATUS', name: 'Active Contract Status Guard' }],
           auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3257,7 +4892,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
       if (new Date(contract.expires_at).getTime() < Date.now()) {
         const reason = `Action BLOCKED: Action Contract ${contract.contract_id} has expired on ${contract.expires_at}.`;
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_CONTRACT');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_CONTRACT', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -3266,6 +4901,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
           matchedPolicies: [{ rule_id: 'POL-CONTRACT-EXPIRED', name: 'Contract Expiration Guard' }],
           auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3287,7 +4923,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
       if (contract.auth_limit.current_executions >= contract.auth_limit.max_executions) {
         const reason = `Action BLOCKED: Action Contract ${contract.contract_id} reached its execution ceiling (${contract.auth_limit.current_executions}/${contract.auth_limit.max_executions}).`;
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 0.95, reason, 'BLOCKED_BY_CONTRACT');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 0.95, reason, 'BLOCKED_BY_CONTRACT', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -3296,6 +4932,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: { decision: 'BLOCK', risk_score: 0.95, reasoning: reason },
           matchedPolicies: [{ rule_id: 'POL-CONTRACT-LIMIT', name: 'Contract Execution Limit Guard' }],
           auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3319,9 +4956,12 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     // 2.7 Multi-Hop Delegation & Contextual Permission Gateway
     const delegationId = body.delegation_id || body.parameters?.delegation_id;
     if (delegationId) {
+      const tenantDelegations = dbState.delegations.filter(
+        (d) => !d.tenant_id || !callerTenant || d.tenant_id === callerTenant
+      );
       const delResult = verifyDelegationChain({
         delegation_id: delegationId,
-        all_delegations: dbState.delegations,
+        all_delegations: tenantDelegations,
         action_capability: capability,
         target_resource: target,
         amount: typeof body.parameters?.amount === 'number' ? body.parameters.amount : undefined,
@@ -3329,7 +4969,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
       if (!delResult.valid) {
         const reason = `Action BLOCKED: Multi-Hop Delegation check failed. ${delResult.failure_reason}. Non-expanding monotonic authorization strictly enforced.`;
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_DELEGATION');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_DELEGATION', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -3338,6 +4978,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
           matchedPolicies: [{ rule_id: 'POL-DEL-CHAIN-001', name: 'Multi-Hop Monotonic Delegation Gate' }],
           auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3360,12 +5001,13 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     }
 
     // 2.8 Runtime Budget Guard (Denial-of-Wallet Protection)
+    const budgetTenantMatch = (b: BudgetPolicyRecord) =>
+      !b.tenant_id || !callerTenant || b.tenant_id === callerTenant;
     const matchingBudget =
-      (body.budget_id && dbState.budgets.find((b) => b.budget_id === body.budget_id)) ||
-      (body.task_id && dbState.budgets.find((b) => b.scope_type === 'TASK' && b.scope_id === body.task_id)) ||
-      dbState.budgets.find((b) => b.scope_type === 'AGENT' && b.scope_id === agentId) ||
+      (body.budget_id && dbState.budgets.find((b) => b.budget_id === body.budget_id && budgetTenantMatch(b))) ||
+      (body.task_id && dbState.budgets.find((b) => b.scope_type === 'TASK' && b.scope_id === body.task_id && budgetTenantMatch(b))) ||
+      dbState.budgets.find((b) => b.scope_type === 'AGENT' && b.scope_id === agentId && budgetTenantMatch(b)) ||
       (callerTenant && dbState.budgets.find((b) => b.scope_type === 'TENANT' && b.tenant_id === callerTenant)) ||
-      dbState.budgets.find((b) => b.scope_type === 'TENANT') ||
       null;
 
     if (matchingBudget) {
@@ -3435,15 +5077,17 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     // 2.9 MCP Server Lifecycle & Sensitive Tool Gate
     const mcpServerId = body.mcp_server_id || body.parameters?.mcp_server_id;
     const mcpToolName = body.tool_name || body.parameters?.tool_name;
+    const mcpTenantMatch = (s: McpServerRecord) =>
+      !s.tenant_id || !callerTenant || s.tenant_id === callerTenant || s.tenant_id === 'tenant_default';
     const mcpServer = mcpServerId
-      ? dbState.mcpServers.find((s) => s.server_id === mcpServerId)
+      ? dbState.mcpServers.find((s) => s.server_id === mcpServerId && mcpTenantMatch(s))
       : mcpToolName
-      ? dbState.mcpServers.find((s) => s.exposed_tools.some((t) => t.name === mcpToolName))
+      ? dbState.mcpServers.find((s) => mcpTenantMatch(s) && s.exposed_tools.some((t) => t.name === mcpToolName))
       : null;
 
     if (mcpServerId && !mcpServer) {
       const reason = `Action BLOCKED: MCP Server "${mcpServerId}" is not registered in CCK Registry.`;
-      const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_MCP');
+      const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_MCP', false, callerTenant || undefined);
       const receipt = mintDecisionReceipt({
         actionId,
         agentId,
@@ -3452,6 +5096,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         target,
         command: command || '',
         severity: severity || 'MUTATION',
+        tenantId: callerTenant || undefined,
         verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
         matchedPolicies: [{ rule_id: 'POL-MCP-REGISTRY-001', name: 'Verified MCP Server Registry Only' }],
         auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3474,7 +5119,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     if (mcpServer) {
       if (mcpServer.lifecycle_status !== 'ACTIVE') {
         const reason = `Action BLOCKED: MCP Server "${mcpServer.name}" is in ${mcpServer.lifecycle_status} status. Tool dispatch is strictly suspended.`;
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_MCP');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_MCP', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -3483,6 +5128,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
           matchedPolicies: [{ rule_id: 'POL-MCP-LIFECYCLE-001', name: 'Active MCP Server Lifecycle Enforcement' }],
           auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3506,7 +5152,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         const tool = mcpServer.exposed_tools.find((t) => t.name === mcpToolName);
         if (tool && tool.is_sensitive && !tool.approved_for_production) {
           const reason = `Action BLOCKED: Sensitive MCP tool "${tool.name}" requires explicit supervisor production approval. Schema hash: ${tool.schema_hash}.`;
-          const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_MCP_APPROVAL');
+          const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_MCP_APPROVAL', false, callerTenant || undefined);
           const receipt = mintDecisionReceipt({
             actionId,
             agentId,
@@ -3515,6 +5161,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
             target,
             command: command || '',
             severity: severity || 'MUTATION',
+            tenantId: callerTenant || undefined,
             verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
             matchedPolicies: [{ rule_id: 'POL-MCP-TOOL-APPROVAL-001', name: 'Supervisor Approval for Sensitive Tools' }],
             auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3540,7 +5187,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     if (skill) {
       if (skill.status === 'REVOKED') {
         const reason = `Action BLOCKED: Skill "${skill.name}" (${skill.skill_id}) has been REVOKED by CCK trust authority.`;
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_SKILL_TRUST');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_SKILL_TRUST', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -3549,6 +5196,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
           matchedPolicies: [{ rule_id: 'POL-SKILL-REVOKED-001', name: 'Revoked Skill Gate' }],
           auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3570,7 +5218,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
       if (skill.status === 'EXPIRED' || new Date(skill.expires_at).getTime() < Date.now()) {
         const reason = `Action BLOCKED: Skill "${skill.name}" (${skill.skill_id}) has EXPIRED on ${skill.expires_at}.`;
-        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_SKILL_TRUST');
+        const audit = recordAuditEntry(actionId, agentId, 'BLOCK', 1.0, reason, 'BLOCKED_BY_SKILL_TRUST', false, callerTenant || undefined);
         const receipt = mintDecisionReceipt({
           actionId,
           agentId,
@@ -3579,6 +5227,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
           target,
           command: command || '',
           severity: severity || 'MUTATION',
+          tenantId: callerTenant || undefined,
           verdict: { decision: 'BLOCK', risk_score: 1.0, reasoning: reason },
           matchedPolicies: [{ rule_id: 'POL-SKILL-EXPIRED-001', name: 'Expired Skill Gate' }],
           auditRef: { audit_id: audit.audit_id, action_hash: audit.action_hash, previous_hash: audit.previous_hash },
@@ -3611,6 +5260,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
       dbState.pendingApprovals.unshift({
         approval_id: approvalId,
+        tenant_id: callerTenant || undefined,
         action_id: actionId,
         agent_id: agentId,
         capability,
@@ -3674,6 +5324,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
         const approvalId = `appr-${crypto.randomUUID().slice(0, 8)}`;
         dbState.pendingApprovals.unshift({
           approval_id: approvalId,
+          tenant_id: callerTenant || undefined,
           action_id: actionId,
           agent_id: agentId,
           capability,
@@ -3745,7 +5396,9 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 
     // Update contract executions
     if (body.contract_id) {
-      const ctr = dbState.contracts.find((c) => c.contract_id === body.contract_id);
+      const ctr = dbState.contracts.find(
+        (c) => c.contract_id === body.contract_id && (!c.tenant_id || !callerTenant || c.tenant_id === callerTenant)
+      );
       if (ctr) ctr.auth_limit.current_executions += 1;
     }
     // Update mandate spend
@@ -3760,6 +5413,7 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
     if (body.idempotency_key) {
       const execRecord: ContractExecutionRecord = {
         execution_id: `exec-${crypto.randomUUID().slice(0, 8)}`,
+        tenant_id: callerTenant || undefined,
         contract_id: body.contract_id || 'ctrc-default',
         idempotency_key: body.idempotency_key,
         agent_id: agentId,
@@ -3816,57 +5470,34 @@ export function evaluateActionGateCore(body: any): { status: number; result: any
 }
 
 const evaluateActionHandler = (req: Request, res: Response) => {
-  const authHeader = (req.headers['authorization'] as string) || '';
-  const apiKeyHeader = req.headers['x-api-key'] as string;
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : apiKeyHeader;
+  const authRes = resolveAuthContext(req);
+  if (!authRes.ok) {
+    return res.status(authRes.status).json({ error: authRes.error, detail: authRes.detail });
+  }
+  const auth = authRes.ctx;
+  if (!WRITE_ROLES.includes(auth.role)) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Viewer role cannot execute or evaluate protected actions.' });
+  }
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  }
 
-  let boundAgentId: string | undefined;
-  let boundTenantId: string | undefined = (req.headers['x-tenant-id'] as string) || undefined;
-  let boundProjectId: string | undefined;
-
-  // Authenticate bearer token or agent API key if present
-  if (token) {
-    if (token.startsWith('cck_live_')) {
-      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-      const matchedKey = dbState.apiKeys.find((k) => k.key_hash === tokenHash);
-      if (!matchedKey) {
-        return res.status(401).json({
-          error: 'INVALID_CREDENTIALS',
-          detail: 'Provided CCK agent API key is invalid or unrecognized.',
-        });
-      }
-      if (!matchedKey.is_active) {
-        return res.status(403).json({
-          error: 'REVOKED',
-          detail: 'CCK agent API key has been revoked and cannot evaluate actions.',
-        });
-      }
-      const matchedAgent = dbState.agents.find((a) => a.key_id === matchedKey.key_id) ||
-        dbState.agents.find((a) => a.project_id === matchedKey.project_id);
-      const matchedProject = dbState.projects.find((p) => p.project_id === matchedKey.project_id);
-      boundAgentId = matchedAgent?.agent_id;
-      boundProjectId = matchedKey.project_id;
-      boundTenantId = boundTenantId || matchedProject?.tenant_id || matchedAgent?.tenant_id;
-    } else if (token.startsWith('cck-token-')) {
-      // Authorized user console session token
-    } else {
-      return res.status(401).json({
-        error: 'UNAUTHORIZED',
-        detail: 'Invalid authentication credentials provided to Action Gate.',
-      });
+  const reqAgentId = typeof req.body?.agent === 'string'
+    ? req.body.agent
+    : req.body?.agent?.id || req.body?.agent?.agent_id || req.body?.agent_id;
+  if (reqAgentId) {
+    const targetAgent = dbState.agents.find((a) => a.agent_id === reqAgentId);
+    if (targetAgent && targetAgent.tenant_id && targetAgent.tenant_id !== auth.tenantId) {
+      return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent evaluation prohibited.' });
     }
-  } else if (req.headers['x-cck-auth-required'] === 'true') {
-    return res.status(401).json({
-      error: 'UNAUTHORIZED',
-      detail: 'Agent authentication required for action gate evaluation.',
-    });
   }
 
   const enrichedBody = {
     ...(req.body || {}),
-    agent: req.body?.agent || boundAgentId,
-    project_id: req.body?.project_id || boundProjectId,
-    tenant_id: req.body?.tenant_id || boundTenantId,
+    agent: req.body?.agent || auth.agentId,
+    project_id: req.body?.project_id || auth.projectId,
+    tenant_id: auth.tenantId,
   };
 
   const { status, result } = evaluateActionGateCore(enrichedBody);
@@ -3877,106 +5508,101 @@ app.post('/api/v1/actions/evaluate', evaluateActionHandler);
 app.post('/api/v1/gate/evaluate', evaluateActionHandler);
 
 // Human Approvals Queue
-app.get('/api/v1/approvals', (_req: Request, res: Response) => {
-  res.json(dbState.pendingApprovals.filter((a) => a.status === 'PENDING'));
+app.get('/api/v1/approvals', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  res.json(dbState.pendingApprovals.filter((a) => a.status === 'PENDING' && a.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/approvals/:id/resolve', (req: Request, res: Response) => {
-  const { approved, reviewer, notes } = req.body;
-  const roleHeader = (req.headers['x-user-role'] as string) || '';
-
-  // RBAC validation: strictly prohibit standard operators or unprivileged roles from resolving approvals
-  if (roleHeader === 'operator' || roleHeader === 'viewer' || roleHeader === 'guest') {
-    return res.status(403).json({
-      error: 'FORBIDDEN',
-      detail: 'Insufficient privileges: Only administrators or supervisors can resolve human approvals.',
-    });
-  }
+app.post('/api/v1/approvals/:id/resolve', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const { approved, reviewer, notes } = req.body || {};
 
   const item = dbState.pendingApprovals.find((a) => a.approval_id === req.params.id);
-  if (item) {
-    item.status = approved ? 'APPROVED' : 'REJECTED';
-    item.reviewer = reviewer || (roleHeader === 'admin' ? 'admin' : 'supervisor');
-
-    recordAuditEntry(
-      item.action_id,
-      item.agent_id,
-      approved ? 'ALLOW' : 'BLOCK',
-      approved ? 0.2 : 0.9,
-      `Human supervisor resolved approval ${item.approval_id}: ${approved ? 'APPROVED' : 'REJECTED'} (${notes || ''})`,
-      approved ? 'SUPERVISOR_APPROVED' : 'SUPERVISOR_REJECTED'
-    );
-
-    persistDatabase();
-    return res.json(item);
+  if (!item) {
+    return res.status(404).json({ detail: 'Approval request not found' });
   }
-  res.status(404).json({ detail: 'Approval request not found' });
+  if (item.tenant_id && item.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant approval resolution prohibited.' });
+  }
+
+  item.status = approved ? 'APPROVED' : 'REJECTED';
+  item.reviewer = reviewer || auth.username || auth.role;
+
+  recordAuditEntry(
+    item.action_id,
+    item.agent_id,
+    approved ? 'ALLOW' : 'BLOCK',
+    approved ? 0.2 : 0.9,
+    `Human supervisor resolved approval ${item.approval_id}: ${approved ? 'APPROVED' : 'REJECTED'} (${notes || ''})`,
+    approved ? 'SUPERVISOR_APPROVED' : 'SUPERVISOR_REJECTED',
+    false,
+    auth.tenantId
+  );
+
+  persistDatabase();
+  return res.json(item);
 });
 
 // Audit Ledger & Cryptographic Verification
-app.get('/api/v1/audits', (req: Request, res: Response) => {
-  const limit = parseInt(req.query.limit as string) || 50;
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  let list = dbState.auditLedger;
-  if (tenantId) {
-    list = list.filter((a) => a.tenant_id === tenantId || (tenantId === 'tenant-corp-acme' && !a.tenant_id));
-  }
+app.get('/api/v1/audits', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit as string) || 50));
+  const list = dbState.auditLedger.filter((a) => a.tenant_id === auth.tenantId);
   res.json(list.slice(0, limit));
 });
 
-app.get('/api/v1/audits/verify-chain', (_req: Request, res: Response) => {
-  let isIntact = true;
-  for (let i = dbState.auditLedger.length - 1; i > 0; i--) {
-    const cur = dbState.auditLedger[i];
-    const prev = dbState.auditLedger[i + 1];
-    if (prev && cur.previous_hash !== prev.action_hash) {
-      isIntact = false;
-      break;
-    }
-  }
-
+app.get('/api/v1/audits/verify-chain', requireAuth(ALL_AUTH_ROLES), (_req: Request, res: Response) => {
+  const check = verifyAuditLedgerChain();
   res.json({
-    verified: isIntact,
-    total_records: dbState.auditLedger.length,
+    verified: check.verified,
+    total_records: check.total_records,
     algorithm: 'SHA-256',
-    latest_hash: dbState.auditLedger[0]?.action_hash || '0'.repeat(64),
-    tamper_detected: !isIntact,
+    latest_hash: check.latest_hash,
+    tamper_detected: check.tamper_detected,
+    broken_index: check.broken_index,
+    broken_audit_id: check.broken_audit_id,
     verified_at: new Date().toISOString(),
   });
 });
 
 // Downloadable Audit Export for Compliance
-app.get('/api/v1/audits/export', (_req: Request, res: Response) => {
+app.get('/api/v1/audits/export', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const tenantRecords = dbState.auditLedger.filter((a) => a.tenant_id === auth.tenantId);
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', 'attachment; filename="cck-audit-ledger.json"');
   res.json({
     export_version: '1.0',
     generated_at: new Date().toISOString(),
-    total_records: dbState.auditLedger.length,
-    latest_hash: dbState.lastChainHash,
+    tenant_id: auth.tenantId,
+    total_records: tenantRecords.length,
+    latest_hash: tenantRecords[0]?.action_hash || dbState.lastChainHash,
     algorithm: 'SHA-256',
-    records: dbState.auditLedger,
+    records: tenantRecords,
   });
 });
 
 // Policies (Global Defaults + Tenant Custom Programmable Firewall Rules)
-app.get('/api/v1/policies', (req: Request, res: Response) => {
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  if (tenantId) {
-    return res.json(dbState.policies.filter((p) => !p.tenant_id || p.tenant_id === tenantId));
-  }
-  res.json(dbState.policies);
+app.get('/api/v1/policies', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.policies.filter((p) => !p.tenant_id || p.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/policies', (req: Request, res: Response) => {
+app.post('/api/v1/policies', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const { name, description, capability_pattern, target_pattern, action_effect, rollout_mode, max_amount_usd, blocked_keywords, risk_level } = req.body || {};
-  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
   if (!name || !capability_pattern) {
     return res.status(400).json({ error: 'name and capability_pattern are required.' });
   }
   const newRule: PolicyRule = {
     rule_id: `POL-USR-${crypto.randomUUID().slice(0, 6).toUpperCase()}`,
-    tenant_id: callerTenant,
+    tenant_id: auth.tenantId,
     name: String(name).trim().slice(0, 120),
     description: String(description || 'Custom Tenant Firewall Rule').trim().slice(0, 300),
     capability_pattern: String(capability_pattern).trim(),
@@ -3999,11 +5625,11 @@ app.post('/api/v1/policies', (req: Request, res: Response) => {
   res.status(201).json(newRule);
 });
 
-app.patch('/api/v1/policies/:id', (req: Request, res: Response) => {
+app.patch('/api/v1/policies/:id', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const rule = dbState.policies.find((p) => p.rule_id === req.params.id);
   if (!rule) return res.status(404).json({ error: 'Policy rule not found.' });
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && rule.tenant_id && rule.tenant_id !== callerTenant) {
+  if (rule.tenant_id && rule.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant policy modification prohibited.' });
   }
   const { is_active, rollout_mode, max_amount_usd, action_effect } = req.body || {};
@@ -4017,12 +5643,12 @@ app.patch('/api/v1/policies/:id', (req: Request, res: Response) => {
   res.json(rule);
 });
 
-app.delete('/api/v1/policies/:id', (req: Request, res: Response) => {
+app.delete('/api/v1/policies/:id', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const idx = dbState.policies.findIndex((p) => p.rule_id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Policy rule not found.' });
   const rule = dbState.policies[idx];
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && rule.tenant_id && rule.tenant_id !== callerTenant) {
+  if (rule.tenant_id && rule.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant policy deletion prohibited.' });
   }
   if (!rule.is_custom) {
@@ -4034,7 +5660,7 @@ app.delete('/api/v1/policies/:id', (req: Request, res: Response) => {
 });
 
 // Connectors
-app.get('/api/v1/connectors', (_req: Request, res: Response) => {
+app.get('/api/v1/connectors', requireAuth(ALL_AUTH_ROLES), (_req: Request, res: Response) => {
   res.json([
     {
       connector_id: 'in_memory_sandbox',
@@ -4076,7 +5702,7 @@ app.get('/api/v1/connectors', (_req: Request, res: Response) => {
 });
 
 // MCP Configuration
-app.get('/api/v1/mcp/config', (_req: Request, res: Response) => {
+app.get('/api/v1/mcp/config', requireAuth(ALL_AUTH_ROLES), (_req: Request, res: Response) => {
   res.json({
     protocol_version: '2024-11-05',
     server_name: 'cck-mcp-server',
@@ -4101,23 +5727,16 @@ const handleMcpJsonRpc = async (req: Request, res: Response) => {
     return res.status(400).json({ jsonrpc: '2.0', id: id || null, error: { code: -32600, message: 'Invalid Request: jsonrpc must be 2.0' } });
   }
 
-  // Optional API Key verification if Bearer cck_live_ provided by MCP client
-  let boundAgentId: string | undefined;
-  let boundTenantId: string | undefined = (req.headers['x-tenant-id'] as string) || undefined;
-  const authHeader = (req.headers['authorization'] as string) || '';
-  const apiKeyHeader = req.headers['x-api-key'] as string;
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : apiKeyHeader;
-  if (token && token.startsWith('cck_live_')) {
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const matchedKey = dbState.apiKeys.find((k) => k.key_hash === tokenHash);
-    if (!matchedKey || !matchedKey.is_active) {
-      return res.status(401).json({ jsonrpc: '2.0', id: id || null, error: { code: -32001, message: 'Invalid or revoked CCK API key' } });
-    }
-    const matchedAgent = dbState.agents.find((a) => a.key_id === matchedKey.key_id) || dbState.agents.find((a) => a.project_id === matchedKey.project_id);
-    const matchedProject = dbState.projects.find((p) => p.project_id === matchedKey.project_id);
-    boundAgentId = matchedAgent?.agent_id;
-    boundTenantId = boundTenantId || matchedProject?.tenant_id || matchedAgent?.tenant_id;
+  const authRes = resolveAuthContext(req);
+  if (!authRes.ok) {
+    return res.status(authRes.status).json({
+      jsonrpc: '2.0',
+      id: id || null,
+      error: { code: -32001, message: authRes.detail },
+    });
   }
+  const boundTenantId = authRes.ctx.tenantId;
+  const boundAgentId = authRes.ctx.agentId;
 
   if (method === 'initialize') {
     return res.json({
@@ -4136,6 +5755,22 @@ const handleMcpJsonRpc = async (req: Request, res: Response) => {
   }
 
   if (method === 'tools/list') {
+    const tenantUpstreams = (dbState.mcpUpstreams || [])
+      .filter((u) => u.tenant_id === boundTenantId)
+      .filter((u) => u.status === 'ACTIVE')
+      .map((u) => ({
+        name: u.tool_name,
+        description: `[CCK Enforced MCP Upstream] ${u.capability} (${u.transport})`,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            target: { type: 'string', description: 'Target resource identifier' },
+            entity_id: { type: 'string', description: 'Optional precondition entity ID' },
+            arguments: { type: 'object', description: 'Tool invocation payload' },
+          },
+        },
+      }));
+
     return res.json({
       jsonrpc: '2.0',
       id,
@@ -4153,6 +5788,21 @@ const handleMcpJsonRpc = async (req: Request, res: Response) => {
                 session_id: { type: 'string', description: 'Agent session tracking ID' },
               },
               required: ['capability', 'target'],
+            },
+          },
+          {
+            name: 'cck_gateway_call',
+            description: 'Invoke a downstream MCP tool physically gated by CCK Runtime Enforcement Gateway.',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                tool_name: { type: 'string', description: 'Registered downstream MCP tool name' },
+                target: { type: 'string', description: 'Target resource' },
+                entity_id: { type: 'string', description: 'Entity ID for freshness/precondition binding' },
+                required_fact_field: { type: 'string', description: 'Fact field required to be fresh/valid' },
+                arguments: { type: 'object', description: 'Arguments passed to downstream tool ONLY if ALLOW' },
+              },
+              required: ['tool_name', 'target'],
             },
           },
           {
@@ -4179,12 +5829,20 @@ const handleMcpJsonRpc = async (req: Request, res: Response) => {
               required: ['agent_id'],
             },
           },
+          ...tenantUpstreams,
         ],
       },
     });
   }
 
   if (method === 'tools/call') {
+    if (!WRITE_ROLES.includes(authRes.ctx.role)) {
+      return res.status(403).json({
+        jsonrpc: '2.0',
+        id: id || null,
+        error: { code: -32003, message: 'Viewer role cannot execute MCP tools/call.' },
+      });
+    }
     const { name: toolName, arguments: toolArgs } = params || {};
 
     if (toolName === 'cck_evaluate_action') {
@@ -4211,34 +5869,16 @@ const handleMcpJsonRpc = async (req: Request, res: Response) => {
       const entity_id = toolArgs?.entity_id;
       const field_name = toolArgs?.field_name;
       const value = toolArgs?.value;
-      const evidenceId = `evi-${crypto.randomUUID().slice(0, 10)}`;
-      const payloadHash = crypto.createHash('sha256').update(JSON.stringify(toolArgs)).digest('hex');
-      const isInvalidated = ['refunded', 'canceled', 'failed', 'revoked', 'expired', 'false', false].includes(value);
-
-      dbState.evidenceList.unshift({
-        evidence_id: evidenceId,
-        entity_id,
-        field_name,
-        raw_payload: toolArgs,
-        source: 'mcp-tool-call',
-        observed_at: new Date().toISOString(),
-        payload_hash: payloadHash,
+      const { response } = ingestChangeRadarPayload({
+        tenantId: boundTenantId,
+        body: { entity_id, field_name, value, source: 'mcp-tool-call', payload: toolArgs },
+        defaultSource: 'mcp-tool-call',
       });
-
-      const existingFact = dbState.facts.find((f) => f.entity_id === entity_id && f.field_name === field_name);
-      if (existingFact) {
-        existingFact.value = value;
-        existingFact.state = isInvalidated ? 'INVALIDATED' : 'VALID';
-        existingFact.version += 1;
-        existingFact.evidence_id = evidenceId;
-      }
-      persistDatabase();
-
       return res.json({
         jsonrpc: '2.0',
         id,
         result: {
-          content: [{ type: 'text', text: JSON.stringify({ status: 'success', evidence_id: evidenceId, fact_state: isInvalidated ? 'INVALIDATED' : 'VALID' }) }],
+          content: [{ type: 'text', text: JSON.stringify(response) }],
         },
       });
     }
@@ -4248,6 +5888,9 @@ const handleMcpJsonRpc = async (req: Request, res: Response) => {
       if (!agent) {
         return res.json({ jsonrpc: '2.0', id, error: { code: -32602, message: 'Agent not found' } });
       }
+      if (agent.tenant_id && agent.tenant_id !== boundTenantId) {
+        return res.status(403).json({ jsonrpc: '2.0', id, error: { code: -32003, message: 'Cross-tenant agent heartbeat prohibited' } });
+      }
       agent.status = 'CONNECTED';
       agent.last_seen_at = new Date().toISOString();
       persistDatabase();
@@ -4256,6 +5899,66 @@ const handleMcpJsonRpc = async (req: Request, res: Response) => {
         id,
         result: {
           content: [{ type: 'text', text: JSON.stringify({ status: 'CONNECTED', agent_id: agent.agent_id, last_seen_at: agent.last_seen_at }) }],
+        },
+      });
+    }
+
+    // Route either explicit cck_gateway_call OR direct downstream tool invocation through MCP Runtime Enforcement Gateway
+    const targetToolName = toolName === 'cck_gateway_call' ? String(toolArgs?.tool_name || '') : String(toolName || '');
+    const upstreamMatch = (dbState.mcpUpstreams || []).find(
+      (u) => u.tool_name === targetToolName && u.tenant_id === boundTenantId
+    );
+    if (toolName === 'cck_gateway_call' || upstreamMatch) {
+      const effectiveTenant = boundTenantId;
+      const gwOut = await executeThroughMcpGateway({
+        deps: {
+          upstreams: dbState.mcpUpstreams,
+          toolIdentities: dbState.toolIdentities,
+          toolDrifts: dbState.toolDrifts,
+          permissionGrants: dbState.permissionGrants,
+          freshnessPolicies: dbState.freshnessPolicies,
+          facts: dbState.facts,
+          dependencyNodes: dbState.dependencyNodes,
+          dependencyEdges: dbState.dependencyEdges,
+          delegations: dbState.delegations,
+          invocations: dbState.mcpGatewayInvocations,
+          factObservations: dbState.factObservations,
+          conflictPolicies: dbState.conflictPolicies,
+          secrets: dbState.vaultSecrets,
+          secretLeases: dbState.secretLeases,
+          secretAccessLogs: dbState.secretAccessLogs,
+          invocationContexts: dbState.invocationContexts,
+          dataClassifications: dbState.dataClassifications,
+          dataFlowPolicies: dbState.dataFlowPolicies,
+          egressPolicies: dbState.egressPolicies,
+          egressReceipts: dbState.egressReceipts,
+          behaviorBaselines: dbState.behaviorBaselines,
+          behaviorDrifts: dbState.behaviorDrifts,
+          evaluateActionGate: evaluateActionGateCore,
+          recordGatewayAudit: (a) => recordAuditEntry(a.actionId, a.agentId, a.decision, a.riskScore, a.reason, a.executionStatus, false, a.tenantId),
+        },
+        tenantId: effectiveTenant,
+        agentId: String(toolArgs?.agent_id || boundAgentId || 'agt-mcp-client'),
+        toolId: toolArgs?.tool_id || upstreamMatch?.tool_id,
+        toolName: targetToolName,
+        capability: toolArgs?.capability || upstreamMatch?.capability,
+        target: String(toolArgs?.target || toolArgs?.entity_id || 'mcp.resource'),
+        entityId: toolArgs?.entity_id,
+        requiredFactField: toolArgs?.required_fact_field,
+        requestedScopes: Array.isArray(toolArgs?.requested_scopes) ? toolArgs.requested_scopes : undefined,
+        delegationId: toolArgs?.delegation_id,
+        parameters: (toolArgs?.arguments as Record<string, unknown>) || toolArgs || {},
+        traceId: (req.headers['x-trace-id'] as string) || toolArgs?.trace_id,
+        idempotencyKey: toolArgs?.idempotency_key,
+        allowLoopbackUpstream: Boolean(toolArgs?.allow_loopback_upstream || req.headers['x-cck-allow-local-upstream'] === 'true'),
+      });
+      persistDatabase();
+      return res.json({
+        jsonrpc: '2.0',
+        id,
+        result: {
+          content: [{ type: 'text', text: JSON.stringify(gwOut) }],
+          isError: !gwOut.allowed,
         },
       });
     }
@@ -4271,7 +5974,7 @@ app.post('/mcp', handleMcpJsonRpc);
 
 
 // Scenarios Suite Runner
-app.get('/api/v1/scenarios', (_req: Request, res: Response) => {
+app.get('/api/v1/scenarios', requireAuth(ALL_AUTH_ROLES), (_req: Request, res: Response) => {
   res.json([
     {
       scenario_id: 'scen_stale_fact_01',
@@ -4318,7 +6021,7 @@ app.get('/api/v1/scenarios', (_req: Request, res: Response) => {
   ]);
 });
 
-app.post('/api/v1/scenarios/run', (_req: Request, res: Response) => {
+app.post('/api/v1/scenarios/run', requireAuth(ALL_AUTH_ROLES), (_req: Request, res: Response) => {
   res.json({
     total: 6,
     passed: 6,
@@ -4368,14 +6071,56 @@ app.post('/api/v1/scenarios/run', (_req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Decision Receipts API (Cryptographically Verifiable Verification Proof)
 // -------------------------------------------------------------
-app.get('/api/v1/receipts', (req: Request, res: Response) => {
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  const shouldRedact = req.query.redact !== 'false';
-  let list = dbState.receipts;
-  if (tenantId) {
-    list = list.filter((r: any) => r.tenant_id === tenantId || (tenantId === 'tenant-corp-acme' && !r.tenant_id));
+function authorizeReceiptAccess(
+  req: Request,
+  receipt: DecisionReceiptRecord
+):
+  | { ok: true; viaShare: boolean; auth?: AuthenticatedContext }
+  | { ok: false; status: number; error: string; detail: string } {
+  const shareRequested = req.query.share === 'true';
+  const shareToken = typeof req.query.share_token === 'string' ? req.query.share_token.trim() : '';
+  if (shareRequested) {
+    if (!shareToken || !receipt.shareable_token) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'UNAUTHORIZED',
+        detail: 'Valid share_token is required for shared receipt access.',
+      };
+    }
+    const providedBuf = Buffer.from(shareToken, 'utf8');
+    const expectedBuf = Buffer.from(receipt.shareable_token, 'utf8');
+    if (providedBuf.length === expectedBuf.length && crypto.timingSafeEqual(providedBuf, expectedBuf)) {
+      return { ok: true, viaShare: true };
+    }
+    return {
+      ok: false,
+      status: 403,
+      error: 'FORBIDDEN',
+      detail: 'Invalid share_token for Decision Receipt.',
+    };
   }
-  list = list.slice(0, 50);
+  const authRes = resolveAuthContext(req);
+  if (!authRes.ok) return authRes;
+  if (receipt.tenant_id && receipt.tenant_id !== authRes.ctx.tenantId) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'FORBIDDEN',
+      detail: 'Cross-tenant receipt inspection prohibited.',
+    };
+  }
+  return { ok: true, viaShare: false, auth: authRes.ctx };
+}
+
+app.get('/api/v1/receipts', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const shouldRedact = req.query.redact !== 'false';
+  const list = dbState.receipts
+    .filter((r) => r.tenant_id === auth.tenantId)
+    .slice(0, 50);
   res.json(shouldRedact ? redactObject(list) : list);
 });
 
@@ -4384,9 +6129,9 @@ app.get('/api/v1/receipts/:id', (req: Request, res: Response) => {
   if (!receipt) {
     return res.status(404).json({ error: 'Receipt not found' });
   }
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && req.query.share !== 'true' && receipt.tenant_id && receipt.tenant_id !== callerTenant) {
-    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant receipt inspection prohibited.' });
+  const access = authorizeReceiptAccess(req, receipt);
+  if (!access.ok) {
+    return res.status(access.status).json({ error: access.error, detail: access.detail });
   }
   const shouldRedact = req.query.redact !== 'false';
   res.json(shouldRedact ? redactObject(receipt) : receipt);
@@ -4397,9 +6142,9 @@ app.get('/api/v1/receipts/:id/export', (req: Request, res: Response) => {
   if (!receipt) {
     return res.status(404).send('Receipt not found');
   }
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && receipt.tenant_id && receipt.tenant_id !== callerTenant) {
-    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant receipt export prohibited.' });
+  const access = authorizeReceiptAccess(req, receipt);
+  if (!access.ok) {
+    return res.status(access.status).json({ error: access.error, detail: access.detail });
   }
   const format = req.query.format || 'json';
   const shouldRedact = req.query.redact !== 'false';
@@ -4485,14 +6230,15 @@ app.get('/api/v1/receipts/:id/export', (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// Interactive Failure Lab Simulation Runner (Zero Registration Required)
+// Interactive Failure Lab Simulation Runner
 // -------------------------------------------------------------
-app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
-  const { scenario_id } = req.body;
+app.post('/api/v1/failure-lab/run', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const tenantId = auth.tenantId;
+  const { scenario_id } = req.body || {};
   const scenarioType = scenario_id || 'scenario_a_inventory';
 
   if (scenarioType === 'scenario_a_inventory') {
-    // 1. Initial State: Inventory = 5 units
     const entityId = 'item:sku-992';
     const initialFact: FactRecord = {
       entity_id: entityId,
@@ -4503,16 +6249,17 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       version: 1,
       state: 'VALID',
       ttl_seconds: 300,
+      tenant_id: tenantId,
       field_fingerprint: crypto.createHash('sha256').update('sku-992:inventory=5').digest('hex'),
     };
-    dbState.facts = dbState.facts.filter((f) => !(f.entity_id === entityId && f.field_name === 'inventory'));
+    dbState.facts = dbState.facts.filter((f) => !(f.tenant_id === tenantId && f.entity_id === entityId && f.field_name === 'inventory'));
     dbState.facts.unshift(initialFact);
 
-    // Initial Dependency
-    dbState.dependencies = dbState.dependencies.filter((d) => !(d.required_fact_entity === entityId));
+    dbState.dependencies = dbState.dependencies.filter((d) => !(d.tenant_id === tenantId && d.required_fact_entity === entityId));
     dbState.dependencies.unshift({
-      dep_id: 'dep-inv-992',
-      project_id: 'proj-prod-ecommerce',
+      dep_id: `dep-inv-992-${tenantId.slice(-6)}`,
+      tenant_id: tenantId,
+      project_id: auth.projectId || 'proj-prod-ecommerce',
       action_capability: 'logistics.purchase',
       required_fact_entity: entityId,
       required_fact_field: 'inventory',
@@ -4520,9 +6267,8 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       created_at: new Date().toISOString(),
     });
 
-    // Stage 1: Before Drift (ALLOW)
     const actId1 = `act-lab-a1-${crypto.randomUUID().slice(0, 6)}`;
-    const audit1 = recordAuditEntry(actId1, 'agt-purchaser', 'ALLOW', 0.1, 'Inventory fact (5 units) satisfies purchase precondition.', 'EXECUTED', true);
+    const audit1 = recordAuditEntry(actId1, 'agt-purchaser', 'ALLOW', 0.1, 'Inventory fact (5 units) satisfies purchase precondition.', 'EXECUTED', true, tenantId);
     const receipt1 = mintDecisionReceipt({
       actionId: actId1,
       agentId: 'agt-purchaser',
@@ -4531,6 +6277,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       target: 'supplier.wholesaler',
       command: 'order_units(sku="sku-992", count=2)',
       severity: 'MUTATION',
+      tenantId,
       verdict: {
         decision: 'ALLOW',
         risk_score: 0.1,
@@ -4539,9 +6286,9 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       matchedPolicies: [{ rule_id: 'POL-INV-001', name: 'Inventory Availability Check' }],
       auditRef: { audit_id: audit1.audit_id, action_hash: audit1.action_hash, previous_hash: audit1.previous_hash },
       driftDetected: false,
+      isDemo: true,
     });
 
-    // Stage 2: Drift Occurs (Warehouse sensor updates inventory to 0)
     const driftedFact: FactRecord = {
       entity_id: entityId,
       field_name: 'inventory',
@@ -4551,15 +6298,15 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       version: 2,
       state: 'INVALIDATED',
       ttl_seconds: 300,
+      tenant_id: tenantId,
       field_fingerprint: crypto.createHash('sha256').update('sku-992:inventory=0').digest('hex'),
     };
-    dbState.facts = dbState.facts.filter((f) => !(f.entity_id === entityId && f.field_name === 'inventory'));
+    dbState.facts = dbState.facts.filter((f) => !(f.tenant_id === tenantId && f.entity_id === entityId && f.field_name === 'inventory'));
     dbState.facts.unshift(driftedFact);
 
-    // Stage 2: After Drift Evaluation (BLOCK)
     const actId2 = `act-lab-a2-${crypto.randomUUID().slice(0, 6)}`;
     const reason2 = 'Action BLOCKED: Required fact item:sku-992.inventory is INVALIDATED or 0. Precondition drift detected. Zero mutations dispatched to external target.';
-    const audit2 = recordAuditEntry(actId2, 'agt-purchaser', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION', true);
+    const audit2 = recordAuditEntry(actId2, 'agt-purchaser', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION', true, tenantId);
     const receipt2 = mintDecisionReceipt({
       actionId: actId2,
       agentId: 'agt-purchaser',
@@ -4568,6 +6315,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       target: 'supplier.wholesaler',
       command: 'order_units(sku="sku-992", count=2)',
       severity: 'MUTATION',
+      tenantId,
       verdict: {
         decision: 'BLOCK',
         risk_score: 0.95,
@@ -4577,6 +6325,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       matchedPolicies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
       auditRef: { audit_id: audit2.audit_id, action_hash: audit2.action_hash, previous_hash: audit2.previous_hash },
       driftDetected: true,
+      isDemo: true,
     });
 
     persistDatabase();
@@ -4623,15 +6372,17 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       version: 1,
       state: 'VALID',
       ttl_seconds: 300,
+      tenant_id: tenantId,
       field_fingerprint: crypto.createHash('sha256').update('usr-402:perm_deploy=active').digest('hex'),
     };
-    dbState.facts = dbState.facts.filter((f) => !(f.entity_id === entityId && f.field_name === 'perm_deploy'));
+    dbState.facts = dbState.facts.filter((f) => !(f.tenant_id === tenantId && f.entity_id === entityId && f.field_name === 'perm_deploy'));
     dbState.facts.unshift(initialFact);
 
-    dbState.dependencies = dbState.dependencies.filter((d) => !(d.required_fact_entity === entityId));
+    dbState.dependencies = dbState.dependencies.filter((d) => !(d.tenant_id === tenantId && d.required_fact_entity === entityId));
     dbState.dependencies.unshift({
-      dep_id: 'dep-iam-402',
-      project_id: 'proj-prod-ecommerce',
+      dep_id: `dep-iam-402-${tenantId.slice(-6)}`,
+      tenant_id: tenantId,
+      project_id: auth.projectId || 'proj-prod-ecommerce',
       action_capability: 'cloud.deploy',
       required_fact_entity: entityId,
       required_fact_field: 'perm_deploy',
@@ -4640,7 +6391,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
     });
 
     const actId1 = `act-lab-b1-${crypto.randomUUID().slice(0, 6)}`;
-    const audit1 = recordAuditEntry(actId1, 'agt-devops', 'ALLOW', 0.1, 'IAM policy verifies active deployment privileges.', 'EXECUTED', true);
+    const audit1 = recordAuditEntry(actId1, 'agt-devops', 'ALLOW', 0.1, 'IAM policy verifies active deployment privileges.', 'EXECUTED', true, tenantId);
     const receipt1 = mintDecisionReceipt({
       actionId: actId1,
       agentId: 'agt-devops',
@@ -4649,6 +6400,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       target: 'k8s.prod-cluster',
       command: 'kubectl apply -f release.yaml',
       severity: 'MUTATION',
+      tenantId,
       verdict: {
         decision: 'ALLOW',
         risk_score: 0.1,
@@ -4657,9 +6409,9 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       matchedPolicies: [{ rule_id: 'POL-IAM-001', name: 'Role Deployment Permission' }],
       auditRef: { audit_id: audit1.audit_id, action_hash: audit1.action_hash, previous_hash: audit1.previous_hash },
       driftDetected: false,
+      isDemo: true,
     });
 
-    // Drift: IAM admin revokes permission
     const driftedFact: FactRecord = {
       entity_id: entityId,
       field_name: 'perm_deploy',
@@ -4669,14 +6421,15 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       version: 2,
       state: 'INVALIDATED',
       ttl_seconds: 300,
+      tenant_id: tenantId,
       field_fingerprint: crypto.createHash('sha256').update('usr-402:perm_deploy=revoked').digest('hex'),
     };
-    dbState.facts = dbState.facts.filter((f) => !(f.entity_id === entityId && f.field_name === 'perm_deploy'));
+    dbState.facts = dbState.facts.filter((f) => !(f.tenant_id === tenantId && f.entity_id === entityId && f.field_name === 'perm_deploy'));
     dbState.facts.unshift(driftedFact);
 
     const actId2 = `act-lab-b2-${crypto.randomUUID().slice(0, 6)}`;
     const reason2 = 'Action BLOCKED: Required fact user:usr-402.perm_deploy is INVALIDATED (current value: "revoked"). Zero mutations dispatched to external target.';
-    const audit2 = recordAuditEntry(actId2, 'agt-devops', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION', true);
+    const audit2 = recordAuditEntry(actId2, 'agt-devops', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION', true, tenantId);
     const receipt2 = mintDecisionReceipt({
       actionId: actId2,
       agentId: 'agt-devops',
@@ -4685,6 +6438,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       target: 'k8s.prod-cluster',
       command: 'kubectl apply -f release.yaml',
       severity: 'MUTATION',
+      tenantId,
       verdict: {
         decision: 'BLOCK',
         risk_score: 0.95,
@@ -4694,6 +6448,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
       matchedPolicies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
       auditRef: { audit_id: audit2.audit_id, action_hash: audit2.action_hash, previous_hash: audit2.previous_hash },
       driftDetected: true,
+      isDemo: true,
     });
 
     persistDatabase();
@@ -4740,15 +6495,17 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
     version: 1,
     state: 'VALID',
     ttl_seconds: 300,
+    tenant_id: tenantId,
     field_fingerprint: crypto.createHash('sha256').update('ord-771:status=eligible').digest('hex'),
   };
-  dbState.facts = dbState.facts.filter((f) => !(f.entity_id === entityId && f.field_name === 'status'));
+  dbState.facts = dbState.facts.filter((f) => !(f.tenant_id === tenantId && f.entity_id === entityId && f.field_name === 'status'));
   dbState.facts.unshift(initialFact);
 
-  dbState.dependencies = dbState.dependencies.filter((d) => !(d.required_fact_entity === entityId));
+  dbState.dependencies = dbState.dependencies.filter((d) => !(d.tenant_id === tenantId && d.required_fact_entity === entityId));
   dbState.dependencies.unshift({
-    dep_id: 'dep-ref-771',
-    project_id: 'proj-prod-ecommerce',
+    dep_id: `dep-ref-771-${tenantId.slice(-6)}`,
+    tenant_id: tenantId,
+    project_id: auth.projectId || 'proj-prod-ecommerce',
     action_capability: 'billing.refund',
     required_fact_entity: entityId,
     required_fact_field: 'status',
@@ -4757,7 +6514,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
   });
 
   const actId1 = `act-lab-c1-${crypto.randomUUID().slice(0, 6)}`;
-  const audit1 = recordAuditEntry(actId1, 'agt-support', 'ALLOW', 0.1, 'Order verified eligible for return/refund.', 'EXECUTED', true);
+  const audit1 = recordAuditEntry(actId1, 'agt-support', 'ALLOW', 0.1, 'Order verified eligible for return/refund.', 'EXECUTED', true, tenantId);
   const receipt1 = mintDecisionReceipt({
     actionId: actId1,
     agentId: 'agt-support',
@@ -4766,6 +6523,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
     target: 'stripe.payment_intent',
     command: 'refund(charge_id="ch_771", amount=120)',
     severity: 'MUTATION',
+    tenantId,
     verdict: {
       decision: 'ALLOW',
       risk_score: 0.1,
@@ -4774,9 +6532,9 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
     matchedPolicies: [{ rule_id: 'POL-REF-001', name: 'Order Refund Eligibility' }],
     auditRef: { audit_id: audit1.audit_id, action_hash: audit1.action_hash, previous_hash: audit1.previous_hash },
     driftDetected: false,
+    isDemo: true,
   });
 
-  // Drift: Dispute filed externally via Stripe Webhook
   const driftedFact: FactRecord = {
     entity_id: entityId,
     field_name: 'status',
@@ -4786,14 +6544,15 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
     version: 2,
     state: 'INVALIDATED',
     ttl_seconds: 300,
+    tenant_id: tenantId,
     field_fingerprint: crypto.createHash('sha256').update('ord-771:status=disputed').digest('hex'),
   };
-  dbState.facts = dbState.facts.filter((f) => !(f.entity_id === entityId && f.field_name === 'status'));
+  dbState.facts = dbState.facts.filter((f) => !(f.tenant_id === tenantId && f.entity_id === entityId && f.field_name === 'status'));
   dbState.facts.unshift(driftedFact);
 
   const actId2 = `act-lab-c2-${crypto.randomUUID().slice(0, 6)}`;
   const reason2 = 'Action BLOCKED: Required fact order:ord-771.status is INVALIDATED (current value: "disputed"). Precondition drift detected. Duplicate disbursement prevented.';
-  const audit2 = recordAuditEntry(actId2, 'agt-support', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION', true);
+  const audit2 = recordAuditEntry(actId2, 'agt-support', 'BLOCK', 0.95, reason2, 'BLOCKED_BY_PRECONDITION', true, tenantId);
   const receipt2 = mintDecisionReceipt({
     actionId: actId2,
     agentId: 'agt-support',
@@ -4802,6 +6561,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
     target: 'stripe.payment_intent',
     command: 'refund(charge_id="ch_771", amount=120)',
     severity: 'MUTATION',
+    tenantId,
     verdict: {
       decision: 'BLOCK',
       risk_score: 0.95,
@@ -4811,6 +6571,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
     matchedPolicies: [{ rule_id: 'POL-REL-DEP-001', name: 'Fact Validity Precondition' }],
     auditRef: { audit_id: audit2.audit_id, action_hash: audit2.action_hash, previous_hash: audit2.previous_hash },
     driftDetected: true,
+    isDemo: true,
   });
 
   persistDatabase();
@@ -4849,7 +6610,7 @@ app.post('/api/v1/failure-lab/run', (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Reproducible Public Benchmark Engine
 // -------------------------------------------------------------
-app.post('/api/v1/benchmark/run', (_req: Request, res: Response) => {
+app.post('/api/v1/benchmark/run', requireAuth(ALL_AUTH_ROLES), (_req: Request, res: Response) => {
   const iterations = 100;
   const start = performance.now();
   let falseBlocks = 0;
@@ -4914,11 +6675,17 @@ app.post('/api/v1/benchmark/run', (_req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Assurance Capabilities API: Contracts (EFFECT)
 // -------------------------------------------------------------
-app.get('/api/v1/contracts', (_req: Request, res: Response) => {
-  res.json(dbState.contracts || []);
+app.get('/api/v1/contracts', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json((dbState.contracts || []).filter((c) => c.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/contracts', (req: Request, res: Response) => {
+app.post('/api/v1/contracts', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const {
     agent_id,
     permitted_action,
@@ -4940,7 +6707,7 @@ app.post('/api/v1/contracts', (req: Request, res: Response) => {
 
   const contract: ActionContractRecord = {
     contract_id: `ctrc-${crypto.randomUUID().slice(0, 8)}`,
-    tenant_id: req.body?.tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant-corp-acme',
+    tenant_id: auth.tenantId,
     agent_id,
     name: req.body?.name || `Action Contract for ${effectiveAction}`,
     description: req.body?.description || `Verified action contract for ${effectiveAction} on ${target_resource}`,
@@ -4974,35 +6741,51 @@ app.post('/api/v1/contracts', (req: Request, res: Response) => {
   res.status(201).json(contract);
 });
 
-app.get('/api/v1/contracts/executions', (_req: Request, res: Response) => {
-  res.json(dbState.contractExecutions || []);
+app.get('/api/v1/contracts/executions', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantContractIds = new Set(dbState.contracts.filter((c) => c.tenant_id === auth.tenantId).map((c) => c.contract_id));
+  res.json((dbState.contractExecutions || []).filter((e) => (e.tenant_id ? e.tenant_id === auth.tenantId : tenantContractIds.has(e.contract_id))));
 });
 
-app.get('/api/v1/contracts/:id', (req: Request, res: Response) => {
+app.get('/api/v1/contracts/:id', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const contract = dbState.contracts.find((c) => c.contract_id === req.params.id);
   if (!contract) {
     res.status(404).json({ error: 'Contract not found' });
     return;
   }
+  if (contract.tenant_id && contract.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant contract access prohibited.' });
+  }
   res.json(contract);
 });
 
-app.delete('/api/v1/contracts/:id', (req: Request, res: Response) => {
+app.delete('/api/v1/contracts/:id', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const contract = dbState.contracts.find((c) => c.contract_id === req.params.id);
   if (!contract) {
     res.status(404).json({ error: 'Contract not found' });
     return;
+  }
+  if (contract.tenant_id && contract.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant contract revocation prohibited.' });
   }
   contract.status = 'REVOKED';
   persistDatabase();
   res.json({ message: 'Contract revoked', contract });
 });
 
-app.post('/api/v1/contracts/:id/prepare', (req: Request, res: Response) => {
+app.post('/api/v1/contracts/:id/prepare', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const contract = dbState.contracts.find((c) => c.contract_id === req.params.id);
   if (!contract) {
     res.status(404).json({ error: 'Contract not found' });
     return;
+  }
+  if (contract.tenant_id && contract.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant contract execution prohibited.' });
   }
   if (contract.status !== 'ACTIVE') {
     res.status(400).json({ error: `Contract is ${contract.status}, cannot prepare execution` });
@@ -5015,7 +6798,6 @@ app.post('/api/v1/contracts/:id/prepare', (req: Request, res: Response) => {
     return;
   }
 
-  // Check if idempotency key was already used
   const existing = dbState.contractExecutions.find(
     (e) => e.contract_id === contract.contract_id && e.idempotency_key === idempotency_key
   );
@@ -5028,6 +6810,7 @@ app.post('/api/v1/contracts/:id/prepare', (req: Request, res: Response) => {
   const execution: ContractExecutionRecord = {
     execution_id: `exec-${crypto.randomUUID().slice(0, 8)}`,
     contract_id: contract.contract_id,
+    tenant_id: auth.tenantId,
     agent_id: contract.agent_id,
     capability: actionCapability,
     action_capability: actionCapability,
@@ -5050,7 +6833,15 @@ app.post('/api/v1/contracts/:id/prepare', (req: Request, res: Response) => {
   res.status(201).json({ execution });
 });
 
-app.post('/api/v1/contracts/:id/authorize', (req: Request, res: Response) => {
+app.post('/api/v1/contracts/:id/authorize', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const contract = dbState.contracts.find((c) => c.contract_id === req.params.id);
+  if (!contract) {
+    return res.status(404).json({ error: 'Contract not found' });
+  }
+  if (contract.tenant_id && contract.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant contract authorization prohibited.' });
+  }
   const { execution_id, supervisor_notes } = req.body || {};
   const execution = dbState.contractExecutions.find(
     (e) => e.execution_id === execution_id && e.contract_id === req.params.id
@@ -5076,11 +6867,17 @@ app.post('/api/v1/contracts/:id/authorize', (req: Request, res: Response) => {
   res.json({ execution });
 });
 
-app.post('/api/v1/contracts/:id/execute', (req: Request, res: Response) => {
+app.post('/api/v1/contracts/:id/execute', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const contract = dbState.contracts.find((c) => c.contract_id === req.params.id);
   if (!contract) {
     res.status(404).json({ error: 'Contract not found' });
     return;
+  }
+  if (contract.tenant_id && contract.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant contract execution prohibited.' });
   }
 
   const {
@@ -5095,7 +6892,6 @@ app.post('/api/v1/contracts/:id/execute', (req: Request, res: Response) => {
     return;
   }
 
-  // 1. Idempotency Check: Prevent duplicate execution
   const existing = dbState.contractExecutions.find(
     (e) => e.contract_id === contract.contract_id && e.idempotency_key === idempotency_key
   );
@@ -5123,7 +6919,6 @@ app.post('/api/v1/contracts/:id/execute', (req: Request, res: Response) => {
     }
   }
 
-  // Contract Active Check
   if (contract.status !== 'ACTIVE') {
     res.status(400).json({ error: `Contract is ${contract.status}, execution rejected` });
     return;
@@ -5131,12 +6926,12 @@ app.post('/api/v1/contracts/:id/execute', (req: Request, res: Response) => {
 
   const actionCapability = contract.action_capability || contract.permitted_action || 'unknown.action';
 
-  // Resolve or initialize execution record
   let execution: ContractExecutionRecord | undefined = existing || (execution_id ? dbState.contractExecutions.find((e) => e.execution_id === execution_id) : undefined);
   if (!execution) {
     execution = {
       execution_id: `exec-${crypto.randomUUID().slice(0, 8)}`,
       contract_id: contract.contract_id,
+      tenant_id: auth.tenantId,
       agent_id: contract.agent_id,
       capability: actionCapability,
       action_capability: actionCapability,
@@ -5158,12 +6953,10 @@ app.post('/api/v1/contracts/:id/execute', (req: Request, res: Response) => {
 
   if (!execution.history) execution.history = [];
 
-  // Transition to EXECUTING
   execution.state = 'EXECUTING';
   execution.history.push({ state: 'EXECUTING', timestamp: new Date().toISOString() });
   execution.updated_at = new Date().toISOString();
 
-  // Check if simulated unknown state is requested
   if (simulate_unknown) {
     execution.state = 'UNKNOWN';
     execution.external_verification_status = 'UNVERIFIED_PENDING_PROBE';
@@ -5184,12 +6977,12 @@ app.post('/api/v1/contracts/:id/execute', (req: Request, res: Response) => {
     return;
   }
 
-  // Run Action Gate verification
   const gateEvaluation = evaluateActionGateCore({
     capability: actionCapability,
     target: contract.target_resource,
     command: execution.command,
     agent: contract.agent_id,
+    tenant_id: auth.tenantId,
     entity_id: parameters?.entity_id || parameters?.order_id || 'order:1099',
     contract_id: contract.contract_id,
     parameters: parameters || {},
@@ -5239,11 +7032,17 @@ app.post('/api/v1/contracts/:id/execute', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/v1/contracts/executions/:id/probe-external', (req: Request, res: Response) => {
+app.post('/api/v1/contracts/executions/:id/probe-external', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const execution = dbState.contractExecutions.find((e) => e.execution_id === req.params.id);
   if (!execution) {
     res.status(404).json({ error: 'Execution not found' });
     return;
+  }
+  const parentContract = dbState.contracts.find((c) => c.contract_id === execution.contract_id);
+  const execTenant = execution.tenant_id || parentContract?.tenant_id;
+  if (execTenant && execTenant !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant contract probe prohibited.' });
   }
 
   if (execution.state !== 'UNKNOWN') {
@@ -5289,11 +7088,17 @@ app.post('/api/v1/contracts/executions/:id/probe-external', (req: Request, res: 
   });
 });
 
-app.post('/api/v1/contracts/executions/:id/compensate', (req: Request, res: Response) => {
+app.post('/api/v1/contracts/executions/:id/compensate', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const execution = dbState.contractExecutions.find((e) => e.execution_id === req.params.id);
   if (!execution) {
     res.status(404).json({ error: 'Execution not found' });
     return;
+  }
+  const parentContract = dbState.contracts.find((c) => c.contract_id === execution.contract_id);
+  const execTenant = execution.tenant_id || parentContract?.tenant_id;
+  if (execTenant && execTenant !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant compensation prohibited.' });
   }
 
   if (execution.state !== 'SUCCEEDED' && execution.state !== 'FAILED' && execution.state !== 'UNKNOWN') {
@@ -5322,15 +7127,20 @@ app.post('/api/v1/contracts/executions/:id/compensate', (req: Request, res: Resp
 // -------------------------------------------------------------
 // Assurance Capabilities API: Mandates & Invariants
 // -------------------------------------------------------------
-app.get('/api/v1/mandates', (_req: Request, res: Response) => {
-  res.json(dbState.mandates || []);
+app.get('/api/v1/mandates', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json((dbState.mandates || []).filter((m) => m.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/mandates', (req: Request, res: Response) => {
+app.post('/api/v1/mandates', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const {
     agent_id,
     name,
-    tenant_id,
     principal,
     spending_limits,
     merchant_restrictions,
@@ -5353,13 +7163,13 @@ app.post('/api/v1/mandates', (req: Request, res: Response) => {
     : { max_per_action: 500, total_budget: 2500, current_spent: 0, currency: 'USD' };
 
   const mandatePayload = {
-    tenant_id: tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant-corp-acme',
+    tenant_id: auth.tenantId,
     agent_id,
     name: name || `Delegated Mandate for ${agent_id}`,
     principal: principal || {
-      user_id: 'usr-admin',
-      user_email: 'supervisor@acme.corp',
-      role: 'Principal Security Officer',
+      user_id: auth.userId,
+      user_email: auth.username,
+      role: auth.role,
     },
     allowed_actions: allowed_actions || ['*'],
     allowed_resources: allowed_resources || ['*'],
@@ -5387,29 +7197,36 @@ app.post('/api/v1/mandates', (req: Request, res: Response) => {
   res.status(201).json(mandate);
 });
 
-app.get('/api/v1/mandates/:id', (req: Request, res: Response) => {
+app.get('/api/v1/mandates/:id', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const mandate = dbState.mandates.find((m) => m.mandate_id === req.params.id);
   if (!mandate) {
     res.status(404).json({ error: 'Mandate not found' });
     return;
+  }
+  if (mandate.tenant_id && mandate.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant mandate access prohibited.' });
   }
   res.json(mandate);
 });
 
-app.delete('/api/v1/mandates/:id', (req: Request, res: Response) => {
+app.delete('/api/v1/mandates/:id', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const mandate = dbState.mandates.find((m) => m.mandate_id === req.params.id);
   if (!mandate) {
     res.status(404).json({ error: 'Mandate not found' });
     return;
   }
-  // Expire mandate immediately
+  if (mandate.tenant_id && mandate.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant mandate revocation prohibited.' });
+  }
   mandate.status = 'REVOKED';
   mandate.time_limit.valid_until = new Date(0).toISOString();
   persistDatabase();
   res.json({ message: 'Mandate revoked and expired', mandate });
 });
 
-app.get('/api/v1/invariants', (_req: Request, res: Response) => {
+app.get('/api/v1/invariants', requireAuth(ALL_AUTH_ROLES), (_req: Request, res: Response) => {
   res.json({
     invariants: STANDARD_INVARIANTS,
     total_active: STANDARD_INVARIANTS.filter((i) => i.active).length,
@@ -5419,11 +7236,15 @@ app.get('/api/v1/invariants', (_req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Assurance Capabilities API: Skill Registry & Impact Evaluation
 // -------------------------------------------------------------
-app.get('/api/v1/skills', (_req: Request, res: Response) => {
-  res.json(dbState.skills || []);
+app.get('/api/v1/skills', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  res.json((dbState.skills || []).filter((s) => !s.tenant_id || s.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/skills', (req: Request, res: Response) => {
+app.post('/api/v1/skills', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const {
     name,
     version,
@@ -5443,12 +7264,13 @@ app.post('/api/v1/skills', (req: Request, res: Response) => {
   }
 
   const isVerifiedCredential = Boolean(review_info?.verified_credential);
-  const publisherObj = typeof effectivePublisher === 'string' 
+  const publisherObj = typeof effectivePublisher === 'string'
     ? { name: effectivePublisher, domain: `${effectivePublisher.toLowerCase().replace(/[^a-z0-9]/g, '')}.com`, verified: isVerifiedCredential }
     : { name: effectivePublisher.name || name, domain: effectivePublisher.domain || 'example.com', verified: Boolean(effectivePublisher.verified) };
 
   const skill: SkillRecord = {
     skill_id: `skl-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: auth.tenantId,
     name,
     version: version || '1.0.0',
     publisher: publisherObj,
@@ -5471,7 +7293,7 @@ app.post('/api/v1/skills', (req: Request, res: Response) => {
         event: 'REGISTERED',
         timestamp: new Date().toISOString(),
         note: `Initial registration (${isVerifiedCredential ? 'Verified Credential' : 'Unverified Attestation'})`,
-        actor: 'api',
+        actor: auth.username,
       },
     ],
     created_at: new Date().toISOString(),
@@ -5482,24 +7304,33 @@ app.post('/api/v1/skills', (req: Request, res: Response) => {
   res.status(201).json(skill);
 });
 
-app.get('/api/v1/skills/impact-receipts', (_req: Request, res: Response) => {
-  res.json(dbState.skillImpactReceipts || []);
+app.get('/api/v1/skills/impact-receipts', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  res.json((dbState.skillImpactReceipts || []).filter((r) => !r.tenant_id || r.tenant_id === auth.tenantId));
 });
 
-app.get('/api/v1/skills/impact-receipts/:id', (req: Request, res: Response) => {
+app.get('/api/v1/skills/impact-receipts/:id', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const receipt = dbState.skillImpactReceipts.find((r) => r.impact_receipt_id === req.params.id);
   if (!receipt) {
     res.status(404).json({ error: 'Impact receipt not found' });
     return;
   }
+  if (receipt.tenant_id && receipt.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant impact receipt access prohibited.' });
+  }
   res.json(receipt);
 });
 
-app.patch('/api/v1/skills/impact-receipts/:id/privacy', (req: Request, res: Response) => {
+app.patch('/api/v1/skills/impact-receipts/:id/privacy', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const receipt = dbState.skillImpactReceipts.find((r) => r.impact_receipt_id === req.params.id);
   if (!receipt) {
     res.status(404).json({ error: 'Impact receipt not found' });
     return;
+  }
+  if (receipt.tenant_id && receipt.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant impact receipt update prohibited.' });
   }
 
   const { external_sharing_enabled, allow_external_sharing, opt_in_telemetry } = req.body || {};
@@ -5515,28 +7346,36 @@ app.patch('/api/v1/skills/impact-receipts/:id/privacy', (req: Request, res: Resp
   res.json({ message: 'Privacy configuration updated', receipt });
 });
 
-app.get('/api/v1/skills/:id', (req: Request, res: Response) => {
+app.get('/api/v1/skills/:id', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const skill = dbState.skills.find((s) => s.skill_id === req.params.id);
   if (!skill) {
     res.status(404).json({ error: 'Skill not found' });
     return;
   }
+  if (skill.tenant_id && skill.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant skill access prohibited.' });
+  }
   res.json(skill);
 });
 
-app.post('/api/v1/skills/:id/review', (req: Request, res: Response) => {
+app.post('/api/v1/skills/:id/review', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const skill = dbState.skills.find((s) => s.skill_id === req.params.id);
   if (!skill) {
     res.status(404).json({ error: 'Skill not found' });
     return;
+  }
+  if (skill.tenant_id && skill.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant skill review prohibited.' });
   }
 
   const { verified_credential, reviewer_name, credential_details, review_notes, status } = req.body || {};
   const isVerified = Boolean(verified_credential);
 
   skill.review_info = {
-    reviewer_id: req.body?.reviewer_id || (isVerified ? 'rev-audit-lead' : 'rev-peer-member'),
-    reviewer_name: reviewer_name || (isVerified ? 'Accredited Reviewer' : 'Peer Reviewer'),
+    reviewer_id: req.body?.reviewer_id || auth.userId,
+    reviewer_name: reviewer_name || auth.username,
     verified_credential: isVerified,
     credential_details: credential_details || (isVerified ? 'Verified Institutional Accreditation' : 'Unverified peer attestation'),
     review_date: new Date().toISOString(),
@@ -5553,38 +7392,49 @@ app.post('/api/v1/skills/:id/review', (req: Request, res: Response) => {
     event: 'REVIEWED',
     timestamp: new Date().toISOString(),
     note: `Skill review updated: ${skill.status} (Verified: ${isVerified})`,
-    actor: reviewer_name || 'auditor',
+    actor: reviewer_name || auth.username,
   });
 
   persistDatabase();
   res.json({ message: 'Skill review updated', skill });
 });
 
-app.post('/api/v1/skills/:id/revoke', (req: Request, res: Response) => {
+app.post('/api/v1/skills/:id/revoke', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const skill = dbState.skills.find((s) => s.skill_id === req.params.id);
   if (!skill) {
     res.status(404).json({ error: 'Skill not found' });
     return;
+  }
+  if (skill.tenant_id && skill.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant skill revocation prohibited.' });
   }
   skill.status = 'REVOKED';
   persistDatabase();
   res.json({ message: 'Skill revoked', skill });
 });
 
-app.post('/api/v1/skills/:id/evaluate-impact', (req: Request, res: Response) => {
+app.post('/api/v1/skills/:id/evaluate-impact', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const skill = dbState.skills.find((s) => s.skill_id === req.params.id);
   if (!skill) {
     res.status(404).json({ error: 'Skill not found' });
     return;
   }
+  if (skill.tenant_id && skill.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant skill evaluation prohibited.' });
+  }
 
   const { modelId, taskCategory, sampleSize, iterations } = req.body || {};
-  const receipt = runControlledSkillEvaluation({
-    skill,
-    modelId,
-    taskCategory,
-    sampleSize: sampleSize ?? iterations,
-  });
+  const receipt = {
+    ...runControlledSkillEvaluation({
+      skill,
+      modelId,
+      taskCategory,
+      sampleSize: sampleSize ?? iterations,
+    }),
+    tenant_id: auth.tenantId,
+  };
 
   dbState.skillImpactReceipts.unshift(receipt);
   persistDatabase();
@@ -5594,11 +7444,15 @@ app.post('/api/v1/skills/:id/evaluate-impact', (req: Request, res: Response) => 
 // -------------------------------------------------------------
 // Assurance Capabilities API: Incidents & Replay Packs
 // -------------------------------------------------------------
-app.get('/api/v1/incidents', (_req: Request, res: Response) => {
-  res.json(dbState.incidents || []);
+app.get('/api/v1/incidents', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  res.json((dbState.incidents || []).filter((i) => i.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/incidents', (req: Request, res: Response) => {
+app.post('/api/v1/incidents', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const {
     title,
     severity,
@@ -5620,7 +7474,7 @@ app.post('/api/v1/incidents', (req: Request, res: Response) => {
 
   const incident: IncidentRecord = {
     incident_id: `inc-${crypto.randomUUID().slice(0, 8)}`,
-    tenant_id: req.body?.tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant-corp-acme',
+    tenant_id: auth.tenantId,
     agent_id: affected_agent_id || 'agt-console',
     action_id: `act-${crypto.randomUUID().slice(0, 8)}`,
     title,
@@ -5645,30 +7499,42 @@ app.post('/api/v1/incidents', (req: Request, res: Response) => {
   res.status(201).json(incident);
 });
 
-app.get('/api/v1/incidents/corrections', (_req: Request, res: Response) => {
-  res.json(dbState.correctionPacks || []);
+app.get('/api/v1/incidents/corrections', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const tenantIncidentIds = new Set(dbState.incidents.filter((i) => i.tenant_id === auth.tenantId).map((i) => i.incident_id));
+  res.json((dbState.correctionPacks || []).filter((c) => (c.tenant_id ? c.tenant_id === auth.tenantId : tenantIncidentIds.has(c.incident_id))));
 });
 
-app.get('/api/v1/incidents/replay-packs', (_req: Request, res: Response) => {
-  res.json(dbState.replayPacks || []);
+app.get('/api/v1/incidents/replay-packs', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const tenantIncidentIds = new Set(dbState.incidents.filter((i) => i.tenant_id === auth.tenantId).map((i) => i.incident_id));
+  res.json((dbState.replayPacks || []).filter((r) => (r.tenant_id ? r.tenant_id === auth.tenantId : tenantIncidentIds.has(r.incident_id))));
 });
 
-app.get('/api/v1/incidents/:id', (req: Request, res: Response) => {
+app.get('/api/v1/incidents/:id', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const incident = dbState.incidents.find((i) => i.incident_id === req.params.id);
   if (!incident) {
     res.status(404).json({ error: 'Incident not found' });
     return;
+  }
+  if (incident.tenant_id && incident.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant incident access prohibited.' });
   }
   const corrections = dbState.correctionPacks.filter((c) => c.incident_id === incident.incident_id);
   const replays = dbState.replayPacks.filter((r) => r.incident_id === incident.incident_id);
   res.json({ incident, corrections, replays });
 });
 
-app.post('/api/v1/incidents/:id/correction', (req: Request, res: Response) => {
+app.post('/api/v1/incidents/:id/correction', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const incident = dbState.incidents.find((i) => i.incident_id === req.params.id);
   if (!incident) {
     res.status(404).json({ error: 'Incident not found' });
     return;
+  }
+  if (incident.tenant_id && incident.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant correction pack creation prohibited.' });
   }
 
   const {
@@ -5684,6 +7550,7 @@ app.post('/api/v1/incidents/:id/correction', (req: Request, res: Response) => {
   const correction: CorrectionPackRecord = {
     pack_id: packId,
     correction_pack_id: packId,
+    tenant_id: auth.tenantId,
     incident_id: incident.incident_id,
     version: version || '1.0.0',
     target_type: 'PRECONDITION_RULE',
@@ -5715,11 +7582,15 @@ app.post('/api/v1/incidents/:id/correction', (req: Request, res: Response) => {
   res.status(201).json(correction);
 });
 
-app.post('/api/v1/incidents/:id/replay-pack', (req: Request, res: Response) => {
+app.post('/api/v1/incidents/:id/replay-pack', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const incident = dbState.incidents.find((i) => i.incident_id === req.params.id);
   if (!incident) {
     res.status(404).json({ error: 'Incident not found' });
     return;
+  }
+  if (incident.tenant_id && incident.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant replay pack creation prohibited.' });
   }
 
   const {
@@ -5730,6 +7601,7 @@ app.post('/api/v1/incidents/:id/replay-pack', (req: Request, res: Response) => {
 
   const replayPack: ReplayPackRecord = {
     replay_pack_id: `rpk-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: auth.tenantId,
     incident_id: incident.incident_id,
     sanitized_inputs: sanitized_inputs || { order_id: 'order:1099', api_keys_redacted: true },
     expected_baseline_failure: expected_baseline_failure || 'Baseline failure reproduced',
@@ -5742,11 +7614,17 @@ app.post('/api/v1/incidents/:id/replay-pack', (req: Request, res: Response) => {
   res.status(201).json(replayPack);
 });
 
-app.post('/api/v1/incidents/replay-packs/:id/run', (req: Request, res: Response) => {
+app.post('/api/v1/incidents/replay-packs/:id/run', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const replayPack = dbState.replayPacks.find((r) => r.replay_pack_id === req.params.id);
   if (!replayPack) {
     res.status(404).json({ error: 'Replay pack not found' });
     return;
+  }
+  const parentIncident = dbState.incidents.find((i) => i.incident_id === replayPack.incident_id);
+  const packTenant = replayPack.tenant_id || parentIncident?.tenant_id;
+  if (packTenant && packTenant !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant replay pack execution prohibited.' });
   }
 
   const correctionPack = dbState.correctionPacks.find(
@@ -5774,7 +7652,8 @@ app.post('/api/v1/incidents/replay-packs/:id/run', (req: Request, res: Response)
   });
 });
 
-app.post('/api/v1/incidents/corrections/:id/approve', (req: Request, res: Response) => {
+app.post('/api/v1/incidents/corrections/:id/approve', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const correctionPack = dbState.correctionPacks.find(
     (c) => c.pack_id === req.params.id || c.correction_pack_id === req.params.id
   );
@@ -5782,14 +7661,16 @@ app.post('/api/v1/incidents/corrections/:id/approve', (req: Request, res: Respon
     res.status(404).json({ error: 'Correction pack not found' });
     return;
   }
-
-  const { reviewed_by, approval_notes } = req.body || {};
+  const incident = dbState.incidents.find((i) => i.incident_id === correctionPack.incident_id);
+  const packTenant = correctionPack.tenant_id || incident?.tenant_id;
+  if (packTenant && packTenant !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant correction approval prohibited.' });
+  }
 
   correctionPack.state = 'APPROVED';
-  correctionPack.reviewed_by = reviewed_by || 'supervisor-authorized';
+  correctionPack.reviewed_by = auth.username;
   correctionPack.reviewed_at = new Date().toISOString();
 
-  const incident = dbState.incidents.find((i) => i.incident_id === correctionPack.incident_id);
   if (incident) {
     incident.status = 'RESOLVED';
     incident.resolved_by_correction_pack_id = correctionPack.pack_id;
@@ -5807,23 +7688,29 @@ app.post('/api/v1/incidents/corrections/:id/approve', (req: Request, res: Respon
 // -------------------------------------------------------------
 // Advanced Agent Governance API: Phase 1 — Multi-Hop Delegations
 // -------------------------------------------------------------
-app.get('/api/v1/delegations', (req: Request, res: Response) => {
-  const { tenant_id, agent_id } = req.query as { tenant_id?: string; agent_id?: string };
-  let list = dbState.delegations || [];
-  if (tenant_id) list = list.filter((d) => d.tenant_id === tenant_id);
+app.get('/api/v1/delegations', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const { agent_id } = req.query as { agent_id?: string };
+  let list = (dbState.delegations || []).filter((d) => d.tenant_id === auth.tenantId);
   if (agent_id) list = list.filter((d) => d.delegator_agent_id === agent_id || d.delegatee_agent_id === agent_id);
   res.json(list);
 });
 
-app.get('/api/v1/delegations/:id', (req: Request, res: Response) => {
+app.get('/api/v1/delegations/:id', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const delegation = dbState.delegations.find((d) => d.delegation_id === req.params.id);
   if (!delegation) {
     res.status(404).json({ error: `Delegation "${req.params.id}" not found` });
     return;
   }
+  if (delegation.tenant_id && delegation.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant delegation access prohibited.' });
+  }
   const chainResult = verifyDelegationChain({
     delegation_id: delegation.delegation_id,
-    all_delegations: dbState.delegations,
+    all_delegations: dbState.delegations.filter((d) => d.tenant_id === auth.tenantId),
   });
   res.json({
     delegation,
@@ -5831,11 +7718,13 @@ app.get('/api/v1/delegations/:id', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/v1/delegations', (req: Request, res: Response) => {
+app.post('/api/v1/delegations', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const {
     delegator_agent_id,
     delegatee_agent_id,
-    tenant_id,
     allowed_actions,
     allowed_resources,
     allowed_tools,
@@ -5852,7 +7741,7 @@ app.post('/api/v1/delegations', (req: Request, res: Response) => {
   const delegation = createRootDelegation({
     delegator_agent_id,
     delegatee_agent_id,
-    tenant_id: tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant_default',
+    tenant_id: auth.tenantId,
     allowed_actions,
     allowed_resources,
     allowed_tools,
@@ -5866,15 +7755,15 @@ app.post('/api/v1/delegations', (req: Request, res: Response) => {
   res.status(201).json({ success: true, delegation });
 });
 
-app.post('/api/v1/delegations/:id/delegate', (req: Request, res: Response) => {
+app.post('/api/v1/delegations/:id/delegate', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const parent = dbState.delegations.find((d) => d.delegation_id === req.params.id);
   if (!parent) {
     res.status(404).json({ error: `Parent delegation "${req.params.id}" not found` });
     return;
   }
 
-  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string);
-  if (callerTenant && parent.tenant_id && callerTenant !== parent.tenant_id) {
+  if (parent.tenant_id && parent.tenant_id !== auth.tenantId) {
     res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant delegation modification prohibited.' });
     return;
   }
@@ -5912,7 +7801,8 @@ app.post('/api/v1/delegations/:id/delegate', (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/v1/delegations/:id/revoke', (req: Request, res: Response) => {
+app.post('/api/v1/delegations/:id/revoke', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const { reason } = req.body || {};
   const delegation = dbState.delegations.find((d) => d.delegation_id === req.params.id);
   if (!delegation) {
@@ -5920,8 +7810,7 @@ app.post('/api/v1/delegations/:id/revoke', (req: Request, res: Response) => {
     return;
   }
 
-  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string);
-  if (callerTenant && delegation.tenant_id && callerTenant !== delegation.tenant_id) {
+  if (delegation.tenant_id && delegation.tenant_id !== auth.tenantId) {
     res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant delegation revocation prohibited.' });
     return;
   }
@@ -5939,7 +7828,9 @@ app.post('/api/v1/delegations/:id/revoke', (req: Request, res: Response) => {
     'BLOCK',
     1.0,
     `Cascading revocation triggered on ${req.params.id}. Invalidated ${result.revoked_count} delegations in chain.`,
-    'DELEGATION_REVOCATION'
+    'DELEGATION_REVOCATION',
+    false,
+    auth.tenantId
   );
 
   persistDatabase();
@@ -5953,15 +7844,19 @@ app.post('/api/v1/delegations/:id/revoke', (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Advanced Agent Governance API: Phase 2 — Runtime Budget Guard
 // -------------------------------------------------------------
-app.get('/api/v1/budgets', (req: Request, res: Response) => {
-  res.json(dbState.budgets || []);
+app.get('/api/v1/budgets', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json((dbState.budgets || []).filter((b) => b.tenant_id === auth.tenantId));
 });
 
-app.get('/api/v1/budgets/:scope/:id', (req: Request, res: Response) => {
+app.get('/api/v1/budgets/:scope/:id', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const scopeType = req.params.scope.toUpperCase();
   const scopeId = req.params.id;
   const budget = dbState.budgets.find(
-    (b) => b.scope_type === scopeType && b.scope_id === scopeId
+    (b) => b.tenant_id === auth.tenantId && b.scope_type === scopeType && b.scope_id === scopeId
   );
   if (!budget) {
     res.status(404).json({ error: `Budget for ${scopeType} "${scopeId}" not found` });
@@ -5970,15 +7865,18 @@ app.get('/api/v1/budgets/:scope/:id', (req: Request, res: Response) => {
   res.json(budget);
 });
 
-app.post('/api/v1/budgets', (req: Request, res: Response) => {
-  const { tenant_id, scope_type, scope_id, limits } = req.body || {};
+app.post('/api/v1/budgets', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const { scope_type, scope_id, limits } = req.body || {};
   if (!scope_type || !scope_id || !limits) {
     res.status(400).json({ error: 'scope_type, scope_id, and limits are required' });
     return;
   }
 
   const existingIdx = dbState.budgets.findIndex(
-    (b) => b.scope_type === scope_type.toUpperCase() && b.scope_id === scope_id
+    (b) => b.tenant_id === auth.tenantId && b.scope_type === scope_type.toUpperCase() && b.scope_id === scope_id
   );
 
   const now = new Date().toISOString();
@@ -6003,7 +7901,7 @@ app.post('/api/v1/budgets', (req: Request, res: Response) => {
 
   const budget: BudgetPolicyRecord = {
     budget_id: `bgt-${crypto.randomUUID().slice(0, 8)}`,
-    tenant_id: tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant_default',
+    tenant_id: auth.tenantId,
     scope_type: scope_type.toUpperCase(),
     scope_id,
     limits: defaultLimits,
@@ -6024,7 +7922,7 @@ app.post('/api/v1/budgets', (req: Request, res: Response) => {
   res.status(201).json({ success: true, budget });
 });
 
-app.post('/api/v1/budgets/estimate', (req: Request, res: Response) => {
+app.post('/api/v1/budgets/estimate', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
   const { model_id, estimated_input_tokens, estimated_output_tokens, tool_calls_count } = req.body || {};
   const estimate = estimateCallCost({
     model_id: model_id || 'gemini-1.5-flash',
@@ -6038,15 +7936,18 @@ app.post('/api/v1/budgets/estimate', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/v1/budgets/record-usage', (req: Request, res: Response) => {
+app.post('/api/v1/budgets/record-usage', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const { budget_id, actual_cost_usd, model_calls, tool_calls, retries } = req.body || {};
   const budget = dbState.budgets.find((b) => b.budget_id === budget_id);
   if (!budget) {
     res.status(404).json({ error: `Budget "${budget_id}" not found` });
     return;
   }
+  if (budget.tenant_id && budget.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant budget modification prohibited.' });
+  }
 
-  // Denial-of-wallet circumvention defense: Reject negative increments
   const costInc = Number(actual_cost_usd || 0);
   const modelCallsInc = Number(model_calls || 0);
   const toolCallsInc = Number(tool_calls || 0);
@@ -6065,7 +7966,6 @@ app.post('/api/v1/budgets/record-usage', (req: Request, res: Response) => {
   budget.usage.retries += retriesInc;
   budget.updated_at = new Date().toISOString();
 
-  // Evaluate if limits exceeded
   if (budget.usage.spent_usd >= budget.limits.max_budget_usd) {
     budget.status = 'EXHAUSTED';
     budget.halt_reason = `Budget ceiling reached ($${budget.usage.spent_usd.toFixed(2)} / $${budget.limits.max_budget_usd.toFixed(2)})`;
@@ -6081,15 +7981,15 @@ app.post('/api/v1/budgets/record-usage', (req: Request, res: Response) => {
   res.json({ success: true, budget });
 });
 
-app.post('/api/v1/budgets/:id/reset', (req: Request, res: Response) => {
+app.post('/api/v1/budgets/:id/reset', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const budget = dbState.budgets.find((b) => b.budget_id === req.params.id);
   if (!budget) {
     res.status(404).json({ error: `Budget "${req.params.id}" not found` });
     return;
   }
 
-  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string);
-  if (callerTenant && budget.tenant_id && callerTenant !== budget.tenant_id) {
+  if (budget.tenant_id && budget.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant budget reset prohibited.' });
   }
 
@@ -6111,21 +8011,31 @@ app.post('/api/v1/budgets/:id/reset', (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Advanced Agent Governance API: Phase 3 — MCP Server Lifecycle
 // -------------------------------------------------------------
-app.get('/api/v1/mcp/servers', (_req: Request, res: Response) => {
-  res.json(dbState.mcpServers || []);
+app.get('/api/v1/mcp/servers', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json((dbState.mcpServers || []).filter((s) => s.tenant_id === auth.tenantId));
 });
 
-app.get('/api/v1/mcp/servers/:id', (req: Request, res: Response) => {
+app.get('/api/v1/mcp/servers/:id', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const server = dbState.mcpServers.find((s) => s.server_id === req.params.id);
   if (!server) {
     res.status(404).json({ error: `MCP Server "${req.params.id}" not found` });
     return;
   }
+  if (server.tenant_id && server.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant MCP server access prohibited.' });
+  }
   res.json(server);
 });
 
-app.post('/api/v1/mcp/servers', (req: Request, res: Response) => {
-  const { name, transport, endpoint_url, version, auth_method, exposed_tools, requested_permissions, tenant_id } = req.body || {};
+app.post('/api/v1/mcp/servers', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const { name, transport, endpoint_url, version, auth_method, exposed_tools, requested_permissions } = req.body || {};
   if (!name || !transport || !Array.isArray(exposed_tools)) {
     res.status(400).json({ error: 'name, transport, and exposed_tools are required' });
     return;
@@ -6157,7 +8067,7 @@ app.post('/api/v1/mcp/servers', (req: Request, res: Response) => {
 
   const server: McpServerRecord = {
     server_id,
-    tenant_id: tenant_id || (req.headers['x-tenant-id'] as string) || 'tenant_default',
+    tenant_id: auth.tenantId,
     name,
     transport,
     endpoint_url,
@@ -6180,11 +8090,15 @@ app.post('/api/v1/mcp/servers', (req: Request, res: Response) => {
   res.status(201).json({ success: true, server });
 });
 
-app.post('/api/v1/mcp/servers/:id/tools/sync', (req: Request, res: Response) => {
+app.post('/api/v1/mcp/servers/:id/tools/sync', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const server = dbState.mcpServers.find((s) => s.server_id === req.params.id);
   if (!server) {
     res.status(404).json({ error: `MCP Server "${req.params.id}" not found` });
     return;
+  }
+  if (server.tenant_id && server.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant MCP tool sync prohibited.' });
   }
 
   const { new_tools } = req.body || {};
@@ -6222,14 +8136,17 @@ app.post('/api/v1/mcp/servers/:id/tools/sync', (req: Request, res: Response) => 
   });
 });
 
-app.post('/api/v1/mcp/servers/:id/approve', (req: Request, res: Response) => {
+app.post('/api/v1/mcp/servers/:id/approve', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const server = dbState.mcpServers.find((s) => s.server_id === req.params.id);
   if (!server) {
     res.status(404).json({ error: `MCP Server "${req.params.id}" not found` });
     return;
   }
+  if (server.tenant_id && server.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant MCP server approval prohibited.' });
+  }
 
-  const { reviewer } = req.body || {};
   const now = new Date().toISOString();
 
   server.lifecycle_status = 'ACTIVE';
@@ -6239,7 +8156,7 @@ app.post('/api/v1/mcp/servers/:id/approve', (req: Request, res: Response) => {
   server.changelog.unshift({
     timestamp: now,
     event: 'SUPERVISOR_APPROVAL',
-    details: `All tools and schemas approved for production by ${reviewer || 'supervisor'}`,
+    details: `All tools and schemas approved for production by ${auth.username}`,
   });
   server.updated_at = now;
 
@@ -6247,15 +8164,15 @@ app.post('/api/v1/mcp/servers/:id/approve', (req: Request, res: Response) => {
   res.json({ success: true, message: 'MCP server tools approved and lifecycle set to ACTIVE.', server });
 });
 
-app.post('/api/v1/mcp/servers/:id/suspend', (req: Request, res: Response) => {
+app.post('/api/v1/mcp/servers/:id/suspend', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const server = dbState.mcpServers.find((s) => s.server_id === req.params.id);
   if (!server) {
     res.status(404).json({ error: `MCP Server "${req.params.id}" not found` });
     return;
   }
 
-  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string);
-  if (callerTenant && server.tenant_id && callerTenant !== server.tenant_id) {
+  if (server.tenant_id && server.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant MCP server suspension prohibited.' });
   }
 
@@ -6274,15 +8191,15 @@ app.post('/api/v1/mcp/servers/:id/suspend', (req: Request, res: Response) => {
   res.json({ success: true, message: 'MCP server suspended. Tools blocked in Action Gate.', server });
 });
 
-app.post('/api/v1/mcp/servers/:id/revoke', (req: Request, res: Response) => {
+app.post('/api/v1/mcp/servers/:id/revoke', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const server = dbState.mcpServers.find((s) => s.server_id === req.params.id);
   if (!server) {
     res.status(404).json({ error: `MCP Server "${req.params.id}" not found` });
     return;
   }
 
-  const callerTenant = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string);
-  if (callerTenant && server.tenant_id && callerTenant !== server.tenant_id) {
+  if (server.tenant_id && server.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant MCP server revocation prohibited.' });
   }
 
@@ -6304,11 +8221,13 @@ app.post('/api/v1/mcp/servers/:id/revoke', (req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Advanced Agent Governance API: Phase 4B — Capability Evidence Proof
 // -------------------------------------------------------------
-app.get('/api/v1/capability-evidence', (_req: Request, res: Response) => {
-  res.json(dbState.capabilityEvidenceReceipts || []);
+app.get('/api/v1/capability-evidence', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  res.json((dbState.capabilityEvidenceReceipts || []).filter((r) => r.tenant_id === auth.tenantId));
 });
 
-app.get('/api/v1/capability-evidence/:id', (req: Request, res: Response) => {
+app.get('/api/v1/capability-evidence/:id', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const receipt = dbState.capabilityEvidenceReceipts.find(
     (r) => r.evidence_receipt_id === req.params.id
   );
@@ -6316,21 +8235,28 @@ app.get('/api/v1/capability-evidence/:id', (req: Request, res: Response) => {
     res.status(404).json({ error: `Capability evidence receipt "${req.params.id}" not found` });
     return;
   }
+  if (receipt.tenant_id && receipt.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant capability evidence access prohibited.' });
+  }
   res.json(receipt);
 });
 
-app.post('/api/v1/agents/:id/evaluate-capability', (req: Request, res: Response) => {
+app.post('/api/v1/agents/:id/evaluate-capability', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
+  if (agent && agent.tenant_id && agent.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant capability evaluation prohibited.' });
+  }
   const { skills_used, task_name, model_id, test_count } = req.body || {};
 
   const totalTests = Math.max(10, test_count || 50);
-  const passed = totalTests; // Deterministic isolated sandbox pass
+  const passed = totalTests;
   const successRate = 1.0;
   const latencyP95 = Math.floor(150 + Math.random() * 40);
   const totalCost = Number((totalTests * 0.00008).toFixed(6));
 
   const receipt = mintCapabilityEvidenceReceipt({
-    tenant_id: agent?.tenant_id || 'tenant_default',
+    tenant_id: auth.tenantId,
     agent_id: req.params.id,
     agent_version: (agent as any)?.version || '1.0.0',
     skills_used: Array.isArray(skills_used) ? skills_used : ['skl-stripe-payments'],
@@ -6359,21 +8285,22 @@ app.post('/api/v1/agents/:id/evaluate-capability', (req: Request, res: Response)
 // 4. Signed Alert Webhooks & Zero-Dependency CI/CD Release Gate
 // -------------------------------------------------------------
 
-app.get('/api/v1/simulator/runs', (req: Request, res: Response) => {
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  const list = tenantId
-    ? (dbState.simulationRuns || []).filter((s) => s.tenant_id === tenantId)
-    : dbState.simulationRuns || [];
+app.get('/api/v1/simulator/runs', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const list = (dbState.simulationRuns || []).filter((s) => s.tenant_id === auth.tenantId);
   res.json(list.slice(0, 30));
 });
 
-app.post('/api/v1/simulator/preflight', (req: Request, res: Response) => {
-  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+app.post('/api/v1/simulator/preflight', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const callerTenant = auth.tenantId;
   const { name, overrides, candidate_actions } = req.body || {};
 
-  const tenantReceipts = dbState.receipts.filter(
-    (r) => !r.tenant_id || r.tenant_id === callerTenant || (callerTenant === 'tenant_default' && r.tenant_id === 'tenant-corp-acme')
-  );
+  const tenantReceipts = dbState.receipts.filter((r) => r.tenant_id === callerTenant);
 
   const simResult = evaluateCounterfactualSimulation({
     tenantId: callerTenant,
@@ -6390,16 +8317,19 @@ app.post('/api/v1/simulator/preflight', (req: Request, res: Response) => {
 });
 
 // Emergency Kill Switches
-app.get('/api/v1/kill-switches', (req: Request, res: Response) => {
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  const list = tenantId
-    ? (dbState.killSwitches || []).filter((k) => k.tenant_id === tenantId)
-    : dbState.killSwitches || [];
+app.get('/api/v1/kill-switches', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const list = (dbState.killSwitches || []).filter((k) => k.tenant_id === auth.tenantId);
   res.json(list);
 });
 
-app.post('/api/v1/kill-switches/trigger', (req: Request, res: Response) => {
-  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+app.post('/api/v1/kill-switches/trigger', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const callerTenant = auth.tenantId;
   const { scope_type, scope_value, reason, triggered_by } = req.body || {};
 
   const validScope: KillSwitchRecord['scope_type'] =
@@ -6420,7 +8350,7 @@ app.post('/api/v1/kill-switches/trigger', (req: Request, res: Response) => {
     scope_type: validScope,
     scope_value: finalScopeVal,
     reason: String(reason || 'Manual emergency freeze triggered by operator').slice(0, 300),
-    triggered_by: String(triggered_by || 'supervisor').slice(0, 80),
+    triggered_by: String(triggered_by || auth.username).slice(0, 80),
     auto_triggered: false,
     status: 'ACTIVE',
     triggered_at: new Date().toISOString(),
@@ -6438,17 +8368,16 @@ app.post('/api/v1/kill-switches/trigger', (req: Request, res: Response) => {
   res.status(201).json(sw);
 });
 
-app.post('/api/v1/kill-switches/:id/resume', (req: Request, res: Response) => {
+app.post('/api/v1/kill-switches/:id/resume', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const sw = dbState.killSwitches.find((k) => k.switch_id === req.params.id);
   if (!sw) return res.status(404).json({ error: 'Kill switch not found.' });
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && sw.tenant_id && callerTenant !== sw.tenant_id) {
+  if (sw.tenant_id && sw.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant kill switch resume prohibited.' });
   }
   sw.status = 'RESUMED';
   sw.resumed_at = new Date().toISOString();
 
-  // Also reset any circuit breaker linked to this switch
   for (const brk of dbState.circuitBreakers || []) {
     if (brk.linked_switch_id === sw.switch_id) {
       brk.status = 'CLOSED';
@@ -6460,16 +8389,18 @@ app.post('/api/v1/kill-switches/:id/resume', (req: Request, res: Response) => {
 });
 
 // Autonomous Circuit Breakers
-app.get('/api/v1/circuit-breakers', (req: Request, res: Response) => {
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  const list = tenantId
-    ? (dbState.circuitBreakers || []).filter((b) => b.tenant_id === tenantId || b.tenant_id === 'tenant_default')
-    : dbState.circuitBreakers || [];
-  res.json(list);
+app.get('/api/v1/circuit-breakers', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json((dbState.circuitBreakers || []).filter((b) => b.tenant_id === auth.tenantId));
 });
 
-app.post('/api/v1/circuit-breakers', (req: Request, res: Response) => {
-  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+app.post('/api/v1/circuit-breakers', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const callerTenant = auth.tenantId;
   const { name, target_scope, target_id, max_consecutive_blocks, window_seconds, enabled } = req.body || {};
   const brk: CircuitBreakerRule = {
     breaker_id: `brk-${crypto.randomUUID().slice(0, 8)}`,
@@ -6490,11 +8421,11 @@ app.post('/api/v1/circuit-breakers', (req: Request, res: Response) => {
   res.status(201).json(brk);
 });
 
-app.post('/api/v1/circuit-breakers/:id/toggle', (req: Request, res: Response) => {
+app.post('/api/v1/circuit-breakers/:id/toggle', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const brk = dbState.circuitBreakers.find((b) => b.breaker_id === req.params.id);
   if (!brk) return res.status(404).json({ error: 'Circuit breaker not found.' });
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && brk.tenant_id && brk.tenant_id !== 'tenant_default' && callerTenant !== brk.tenant_id) {
+  if (brk.tenant_id && brk.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant breaker update prohibited.' });
   }
   const { enabled, reset } = req.body || {};
@@ -6508,22 +8439,29 @@ app.post('/api/v1/circuit-breakers/:id/toggle', (req: Request, res: Response) =>
 });
 
 // Signed Alert Webhooks
-app.get('/api/v1/alert-webhooks', (req: Request, res: Response) => {
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
+app.get('/api/v1/alert-webhooks', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
   const list = (dbState.alertWebhooks || [])
-    .filter((w) => !tenantId || w.tenant_id === tenantId)
+    .filter((w) => w.tenant_id === auth.tenantId)
     .map(({ signing_secret_hash: _hidden, ...safe }) => safe);
   res.json(list);
 });
 
-app.get('/api/v1/alert-webhooks/deliveries', (req: Request, res: Response) => {
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  const list = (dbState.webhookDeliveries || []).filter((d) => !tenantId || d.tenant_id === tenantId);
+app.get('/api/v1/alert-webhooks/deliveries', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const list = (dbState.webhookDeliveries || []).filter((d) => d.tenant_id === auth.tenantId);
   res.json(list.slice(0, 40));
 });
 
-app.post('/api/v1/alert-webhooks', (req: Request, res: Response) => {
-  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || 'tenant_default';
+app.post('/api/v1/alert-webhooks', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const callerTenant = auth.tenantId;
   const { name, target_url, events } = req.body || {};
   if (!target_url || isSsrfUnsafeUrl(String(target_url))) {
     return res.status(400).json({ error: 'Invalid or SSRF-blocked webhook URL. Use a public HTTPS endpoint.' });
@@ -6554,11 +8492,11 @@ app.post('/api/v1/alert-webhooks', (req: Request, res: Response) => {
   });
 });
 
-app.post('/api/v1/alert-webhooks/:id/test', (req: Request, res: Response) => {
+app.post('/api/v1/alert-webhooks/:id/test', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const sub = dbState.alertWebhooks.find((w) => w.webhook_id === req.params.id);
   if (!sub) return res.status(404).json({ error: 'Webhook subscription not found.' });
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && sub.tenant_id !== callerTenant) {
+  if (sub.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant webhook access prohibited.' });
   }
   dispatchAlertWebhookEvent(sub.tenant_id, 'HIGH_RISK_BLOCK', {
@@ -6569,11 +8507,11 @@ app.post('/api/v1/alert-webhooks/:id/test', (req: Request, res: Response) => {
   res.json({ success: true, delivery: dbState.webhookDeliveries[0] });
 });
 
-app.delete('/api/v1/alert-webhooks/:id', (req: Request, res: Response) => {
+app.delete('/api/v1/alert-webhooks/:id', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const idx = dbState.alertWebhooks.findIndex((w) => w.webhook_id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'Webhook subscription not found.' });
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && dbState.alertWebhooks[idx].tenant_id !== callerTenant) {
+  if (dbState.alertWebhooks[idx].tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant webhook deletion prohibited.' });
   }
   dbState.alertWebhooks.splice(idx, 1);
@@ -6585,9 +8523,9 @@ app.delete('/api/v1/alert-webhooks/:id', (req: Request, res: Response) => {
 app.post('/api/v1/receipts/:id/verify-proof', (req: Request, res: Response) => {
   const receipt = dbState.receipts.find((r) => r.receipt_id === req.params.id);
   if (!receipt) return res.status(404).json({ error: 'Receipt not found.' });
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && req.query.share !== 'true' && receipt.tenant_id && receipt.tenant_id !== callerTenant) {
-    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant receipt verification prohibited.' });
+  const access = authorizeReceiptAccess(req, receipt);
+  if (!access.ok) {
+    return res.status(access.status).json({ error: access.error, detail: access.detail });
   }
   const { tamper_simulation } = req.body || {};
   const result = verifyReceiptProof({
@@ -6620,19 +8558,19 @@ app.get('/api/v1/public/verify/:id', (req: Request, res: Response) => {
   });
 });
 
-app.get('/api/v1/agents/:id/passport', (req: Request, res: Response) => {
+app.get('/api/v1/agents/:id/passport', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
   const agent = dbState.agents.find((a) => a.agent_id === req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent not found.' });
-  const callerTenant = (req.headers['x-tenant-id'] as string) || '';
-  if (callerTenant && agent.tenant_id && agent.tenant_id !== callerTenant) {
+  if (agent.tenant_id && agent.tenant_id !== auth.tenantId) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant agent passport prohibited.' });
   }
-  const agentReceipts = dbState.receipts.filter((r) => r.agent_id === agent.agent_id);
+  const agentReceipts = dbState.receipts.filter((r) => r.agent_id === agent.agent_id && r.tenant_id === auth.tenantId);
   const activeSwitches = (dbState.killSwitches || []).filter(
     (s) => s.status === 'ACTIVE' && s.tenant_id === agent.tenant_id && (s.scope_type === 'GLOBAL_TENANT' || (s.scope_type === 'AGENT' && s.scope_value === agent.agent_id))
   ).length;
   const openIncidents = dbState.incidents.filter(
-    (i) => i.agent_id === agent.agent_id && i.status !== 'RESOLVED'
+    (i) => i.agent_id === agent.agent_id && i.tenant_id === auth.tenantId && i.status !== 'RESOLVED'
   ).length;
 
   const passport = computeAgentTrustPassport({
@@ -6640,7 +8578,7 @@ app.get('/api/v1/agents/:id/passport', (req: Request, res: Response) => {
     agentReceipts,
     activeKillSwitchesCount: activeSwitches,
     openIncidentsCount: openIncidents,
-    chainVerified: true,
+    chainVerified: verifyAuditLedgerChain().verified,
   });
   res.json(passport);
 });
@@ -6660,7 +8598,7 @@ app.get('/api/v1/agents/:id/badge.svg', (req: Request, res: Response) => {
     agentReceipts,
     activeKillSwitchesCount: activeSwitches,
     openIncidentsCount: openIncidents,
-    chainVerified: true,
+    chainVerified: verifyAuditLedgerChain().verified,
   });
   res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
@@ -6668,31 +8606,36 @@ app.get('/api/v1/agents/:id/badge.svg', (req: Request, res: Response) => {
 });
 
 // Zero-Dependency CI/CD Release Gate
-app.get('/api/v1/ci/reports', (req: Request, res: Response) => {
-  const tenantId = (req.headers['x-tenant-id'] as string) || (req.query.tenant_id as string) || '';
-  const list = (dbState.ciGateReports || []).filter((r) => !tenantId || r.tenant_id === tenantId);
+app.get('/api/v1/ci/reports', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const list = (dbState.ciGateReports || []).filter((r) => r.tenant_id === auth.tenantId);
   res.json(list.slice(0, 20));
 });
 
-app.post('/api/v1/ci/gate-check', (req: Request, res: Response) => {
-  const callerTenant = (req.headers['x-tenant-id'] as string) || req.body?.tenant_id || '';
+app.post('/api/v1/ci/gate-check', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const callerTenant = auth.tenantId;
   const { agent_id, origin } = req.body || {};
   const agent = agent_id
     ? dbState.agents.find((a) => a.agent_id === agent_id)
-    : dbState.agents.find((a) => !callerTenant || a.tenant_id === callerTenant);
+    : dbState.agents.find((a) => a.tenant_id === callerTenant);
   if (!agent) return res.status(404).json({ error: 'Agent not found for CI release gate check.' });
-  if (callerTenant && agent.tenant_id && agent.tenant_id !== callerTenant) {
+  if (agent.tenant_id && agent.tenant_id !== callerTenant) {
     return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant CI gate check prohibited.' });
   }
 
-  const effectiveTenant = callerTenant || agent.tenant_id || 'tenant_default';
+  const effectiveTenant = callerTenant;
   const activeSwitches = (dbState.killSwitches || []).filter(
     (s) => s.status === 'ACTIVE' && s.tenant_id === effectiveTenant && (s.scope_type === 'GLOBAL_TENANT' || (s.scope_type === 'AGENT' && s.scope_value === agent.agent_id))
   );
   const openIncidents = dbState.incidents.filter(
     (i) => (i.agent_id === agent.agent_id || i.tenant_id === effectiveTenant) && i.status === 'OPEN'
   );
-  const unverifiedSkillsCount = dbState.skills.filter((s) => s.status === 'UNVERIFIED').length;
+  const unverifiedSkillsCount = dbState.skills.filter((s) => (!s.tenant_id || s.tenant_id === effectiveTenant) && s.status === 'UNVERIFIED').length;
   const reqOrigin = origin || `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
 
   const report = evaluateCiReleaseGate({
@@ -6708,6 +8651,1900 @@ app.post('/api/v1/ci/gate-check', (req: Request, res: Response) => {
   if (dbState.ciGateReports.length > 30) dbState.ciGateReports = dbState.ciGateReports.slice(0, 30);
   persistDatabase();
   res.json(report);
+});
+
+// -------------------------------------------------------------
+// Batch 1 API: Fact Intelligence, Tool Intelligence & MCP Runtime Gateway
+// -------------------------------------------------------------
+
+// Feature 1: Adaptive Freshness Engine
+app.get('/api/v1/freshness/policies', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const list = dbState.freshnessPolicies.filter(
+    (p) => p.tenant_id === auth.tenantId || p.tenant_id === 'tenant_default' || p.tenant_id === '*'
+  );
+  res.json(list);
+});
+
+app.post('/api/v1/freshness/policies', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const { source_id, fact_type, entity_pattern, risk_class, min_ttl_seconds, default_ttl_seconds, max_ttl_seconds, stale_grace_seconds, fail_mode } = req.body || {};
+  if (!risk_class || !['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(risk_class)) {
+    return res.status(400).json({ error: 'Valid risk_class (LOW|MEDIUM|HIGH|CRITICAL) is required.' });
+  }
+  const policy = createFreshnessPolicy({
+    tenant_id: auth.tenantId,
+    source_id,
+    fact_type,
+    entity_pattern,
+    risk_class,
+    min_ttl_seconds,
+    default_ttl_seconds,
+    max_ttl_seconds,
+    stale_grace_seconds,
+    fail_mode,
+  });
+  dbState.freshnessPolicies.unshift(policy);
+  persistDatabase();
+  res.status(201).json(policy);
+});
+
+app.post('/api/v1/freshness/evaluate', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { entity_id, field_name, now_ms } = req.body || {};
+  if (!entity_id || !field_name) {
+    return res.status(400).json({ error: 'entity_id and field_name are required.' });
+  }
+  const fact = dbState.facts.find(
+    (f) => f.entity_id === entity_id && f.field_name === field_name && f.tenant_id === tenantId
+  );
+  const result = evaluateFactFreshness({
+    fact,
+    entityId: entity_id,
+    fieldName: field_name,
+    tenantId,
+    policies: dbState.freshnessPolicies,
+    nowMs: typeof now_ms === 'number' ? now_ms : undefined,
+  });
+  res.json(result);
+});
+
+// Feature 2: Live Change Radar
+app.get('/api/v1/radar/sources', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.changeSources.filter((s) => s.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/radar/sources', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { name, source_type, endpoint_url, poll_interval_seconds, rate_limit_per_minute, schema_version, allow_loopback } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'Source name is required.' });
+  if (endpoint_url && !isRadarUrlSafe(String(endpoint_url), Boolean(allow_loopback))) {
+    return res.status(400).json({ error: 'SSRF_BLOCKED: Polling endpoint URL rejected by SSRF guard.' });
+  }
+  const now = new Date().toISOString();
+  const src: ChangeSourceRecord = {
+    source_id: `rsrc-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: tenantId,
+    name: String(name).trim(),
+    source_type: source_type || 'WEBHOOK',
+    endpoint_url: endpoint_url ? String(endpoint_url).trim() : undefined,
+    poll_interval_seconds: Math.max(5, Number(poll_interval_seconds || 60)),
+    consecutive_failures: 0,
+    status: 'ACTIVE',
+    rate_limit_per_minute: Math.max(5, Number(rate_limit_per_minute || 120)),
+    schema_version: String(schema_version || '1.0'),
+    created_at: now,
+    updated_at: now,
+  };
+  dbState.changeSources.unshift(src);
+  persistDatabase();
+  res.status(201).json(src);
+});
+
+app.post('/api/v1/radar/sources/:id/poll', requireAuth(WRITE_ROLES), async (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const source = dbState.changeSources.find((s) => s.source_id === req.params.id);
+  if (!source) return res.status(404).json({ error: 'Change source not found.' });
+  if (source.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant radar polling prohibited.' });
+  }
+
+  const pollOut = await pollExternalRadarSource({
+    source,
+    allowLoopbackForTest: Boolean(req.body?.allow_loopback),
+    inlineItems: Array.isArray(req.body?.inline_items) ? req.body.inline_items : undefined,
+    simulateFailureError: typeof req.body?.simulate_error === 'string' ? req.body.simulate_error : undefined,
+  });
+
+  if (!pollOut.ok) {
+    const dlq = createFailedChangeEvent({
+      tenantId: source.tenant_id,
+      sourceId: source.source_id,
+      rawPayload: { endpoint_url: source.endpoint_url, cursor: source.cursor },
+      errorCode: 'RADAR_POLL_FAILED',
+      errorMessage: pollOut.error || 'Polling failure',
+    });
+    dbState.failedChangeEvents.unshift(dlq);
+    persistDatabase();
+    return res.status(502).json({
+      ok: false,
+      source,
+      error: pollOut.error,
+      dead_letter_id: dlq.dead_letter_id,
+    });
+  }
+
+  const ingested: Array<Record<string, unknown>> = [];
+  for (const item of pollOut.items) {
+    const resItem = ingestChangeRadarPayload({
+      tenantId: source.tenant_id,
+      body: { ...item, source: source.name },
+      defaultSource: source.source_id,
+    });
+    ingested.push(resItem.response);
+  }
+  persistDatabase();
+  res.json({ ok: true, source, ingested_count: ingested.length, ingested });
+});
+
+app.get('/api/v1/radar/events', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.changeEvents.filter((e) => e.tenant_id === auth.tenantId).slice(0, 100));
+});
+
+app.get('/api/v1/radar/failed-events', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.failedChangeEvents.filter((e) => e.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/radar/failed-events/:id/replay', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const dlq = dbState.failedChangeEvents.find((d) => d.dead_letter_id === req.params.id);
+  if (!dlq) return res.status(404).json({ error: 'Failed event not found in dead-letter queue.' });
+  if (dlq.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant dead-letter replay prohibited.' });
+  }
+  const merged = { ...dlq.raw_event_redacted, ...(req.body?.override_payload || {}) } as Record<string, any>;
+  if (!merged.entity_id || !merged.field_name) {
+    dlq.retry_count += 1;
+    dlq.status = 'REPLAYED_FAILED';
+    persistDatabase();
+    return res.status(400).json({ error: 'Dead-letter replay requires valid entity_id and field_name.', dead_letter: dlq });
+  }
+  const out = ingestChangeRadarPayload({
+    tenantId: dlq.tenant_id,
+    body: merged,
+    defaultSource: dlq.source_id,
+  });
+  dlq.retry_count += 1;
+  dlq.replayed_at = new Date().toISOString();
+  dlq.status = out.httpStatus < 400 ? 'REPLAYED_SUCCEEDED' : 'REPLAYED_FAILED';
+  persistDatabase();
+  res.json({ dead_letter: dlq, result: out.response });
+});
+
+// Feature 3: Semantic Change Detection
+app.post('/api/v1/semantic-diff/compare', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { subject_id, before, after, ignored_fields, material_fields } = req.body || {};
+  const diff = computeSemanticDiff({
+    tenant_id: tenantId,
+    subject_id: String(subject_id || 'payload'),
+    before,
+    after,
+    ignored_fields: Array.isArray(ignored_fields) ? ignored_fields : undefined,
+    material_fields: Array.isArray(material_fields) ? material_fields : undefined,
+  });
+  dbState.semanticDiffs.unshift(diff);
+  if (dbState.semanticDiffs.length > 200) dbState.semanticDiffs.pop();
+  persistDatabase();
+  res.json(diff);
+});
+
+app.get('/api/v1/semantic-diff/history', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.semanticDiffs.filter((d) => d.tenant_id === auth.tenantId).slice(0, 60));
+});
+
+// Feature 4: Impact & Invalidation Cascade Graph
+app.get('/api/v1/dependency-graph', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const nodes = dbState.dependencyNodes.filter((n) => n.tenant_id === tenantId);
+  const edges = dbState.dependencyEdges.filter((e) => e.tenant_id === tenantId);
+  const cascades = dbState.invalidationCascades.filter((c) => c.tenant_id === tenantId).slice(0, 30);
+  res.json({ tenant_id: tenantId, nodes, edges, cascades });
+});
+
+app.post('/api/v1/dependency-graph/nodes', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { node_type, ref_id, label, state, metadata } = req.body || {};
+  if (!node_type || !ref_id) {
+    return res.status(400).json({ error: 'node_type and ref_id are required.' });
+  }
+  const node = upsertDependencyNode({
+    nodes: dbState.dependencyNodes,
+    tenantId,
+    nodeType: node_type,
+    refId: String(ref_id),
+    label,
+    state,
+    metadata,
+  });
+  persistDatabase();
+  res.status(201).json(node);
+});
+
+app.post('/api/v1/dependency-graph/edges', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { from_node_id, to_node_id, from_type, from_ref, to_type, to_ref, relation } = req.body || {};
+
+  let fromId = from_node_id;
+  let toId = to_node_id;
+  if (!fromId && from_type && from_ref) {
+    fromId = upsertDependencyNode({ nodes: dbState.dependencyNodes, tenantId, nodeType: from_type, refId: String(from_ref) }).node_id;
+  }
+  if (!toId && to_type && to_ref) {
+    toId = upsertDependencyNode({ nodes: dbState.dependencyNodes, tenantId, nodeType: to_type, refId: String(to_ref) }).node_id;
+  }
+  if (!fromId || !toId) {
+    return res.status(400).json({ error: 'Specify from_node_id/to_node_id or (from_type, from_ref, to_type, to_ref).' });
+  }
+
+  const out = addDependencyEdge({
+    nodes: dbState.dependencyNodes,
+    edges: dbState.dependencyEdges,
+    tenantId,
+    fromNodeId: fromId,
+    toNodeId: toId,
+    relation: relation || 'FEEDS',
+  });
+  if (!out.ok) {
+    return res.status(400).json({ error: out.error });
+  }
+  persistDatabase();
+  res.status(201).json(out.edge);
+});
+
+app.post('/api/v1/dependency-graph/cascade', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { trigger_node_id, node_type, ref_id, target_state, reason, trace_id, idempotency_key, simulate_outbox_failure_node_id } = req.body || {};
+  const nodeId = trigger_node_id || (node_type && ref_id ? makeNodeId(tenantId, node_type, String(ref_id)) : '');
+  const triggerNode = dbState.dependencyNodes.find((n) => n.node_id === nodeId && n.tenant_id === tenantId);
+  if (!triggerNode) {
+    return res.status(404).json({ error: 'Trigger dependency node not found for tenant.' });
+  }
+  const cascade = executeInvalidationCascade({
+    nodes: dbState.dependencyNodes,
+    edges: dbState.dependencyEdges,
+    cascades: dbState.invalidationCascades,
+    tenantId,
+    triggerNodeId: triggerNode.node_id,
+    targetState: target_state === 'REVALIDATE_REQUIRED' ? 'REVALIDATE_REQUIRED' : 'INVALIDATED',
+    reason: String(reason || 'Manual invalidation cascade'),
+    traceId: String(trace_id || `tr-${crypto.randomUUID().slice(0, 8)}`),
+    idempotencyKey: idempotency_key,
+    simulateOutboxFailureNodeId: simulate_outbox_failure_node_id,
+  });
+  persistDatabase();
+  res.json(cascade);
+});
+
+app.post('/api/v1/dependency-graph/revalidate', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { node_id, node_type, ref_id } = req.body || {};
+  const targetId = node_id || (node_type && ref_id ? makeNodeId(tenantId, node_type, String(ref_id)) : '');
+  const updated = revalidateCascadeNodes({
+    nodes: dbState.dependencyNodes,
+    edges: dbState.dependencyEdges,
+    tenantId,
+    rootNodeId: targetId,
+  });
+  persistDatabase();
+  res.json({ revalidated_nodes: updated });
+});
+
+app.get('/api/v1/dependency-graph/cascades', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.invalidationCascades.filter((c) => c.tenant_id === auth.tenantId));
+});
+
+// Features 9 & 10: Tool Identity Fingerprint & Tool Drift Intelligence
+app.get('/api/v1/tools/identities', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.toolIdentities.filter((t) => t.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/tools/identities', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const body = req.body || {};
+  if (!body.tool_id) return res.status(400).json({ error: 'tool_id is required.' });
+  const outcome = registerOrUpdateToolIdentity({
+    identities: dbState.toolIdentities,
+    drifts: dbState.toolDrifts,
+    tenantId,
+    rawDefinition: body,
+    recordedBy: auth.username,
+  });
+  persistDatabase();
+  res.status(outcome.isNew ? 201 : 200).json(outcome);
+});
+
+app.post('/api/v1/tools/identities/:id/approve', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const identity = dbState.toolIdentities.find(
+    (t) => t.tool_identity_id === req.params.id || t.tool_id === req.params.id
+  );
+  if (!identity) return res.status(404).json({ error: 'Tool identity not found.' });
+  if (identity.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant tool identity approval prohibited.' });
+  }
+  const now = new Date().toISOString();
+  const reviewer = auth.username;
+  if (identity.history[0]) {
+    identity.history[0].approved = true;
+    identity.history[0].approved_by = reviewer;
+    identity.history[0].approved_at = now;
+  }
+  identity.drift_status = 'CLEAN';
+  identity.updated_at = now;
+  dbState.toolDrifts.forEach((d) => {
+    if (d.tool_identity_id === identity.tool_identity_id && d.tenant_id === auth.tenantId && !d.resolved) {
+      d.resolved = true;
+      d.resolved_by = reviewer;
+      d.resolved_at = now;
+    }
+  });
+  persistDatabase();
+  res.json({ success: true, identity });
+});
+
+app.get('/api/v1/tools/drifts', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.toolDrifts.filter((d) => d.tenant_id === auth.tenantId));
+});
+
+// Feature 11: Permission Graph & Least Privilege
+app.get('/api/v1/permissions/grants', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.permissionGrants.filter((g) => g.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/permissions/grants', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { org_id, user_id, agent_id, tool_id, resource_pattern, action, scopes, origin, policy_id, delegation_id, expires_at } = req.body || {};
+  if (!agent_id || !Array.isArray(scopes)) {
+    return res.status(400).json({ error: 'agent_id and scopes[] are required.' });
+  }
+  const grant = createPermissionGrant({
+    tenant_id: tenantId,
+    org_id,
+    user_id,
+    agent_id: String(agent_id),
+    tool_id,
+    resource_pattern,
+    action,
+    scopes,
+    origin: origin === 'CONFIGURED' ? 'CONFIGURED' : 'GRANTED',
+    policy_id,
+    delegation_id,
+    expires_at,
+    created_by: auth.username,
+  });
+  dbState.permissionGrants.unshift(grant);
+  persistDatabase();
+  res.status(201).json(grant);
+});
+
+app.post('/api/v1/permissions/grants/:id/revoke', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const grant = dbState.permissionGrants.find((g) => g.grant_id === req.params.id);
+  if (!grant) return res.status(404).json({ error: 'Permission grant not found.' });
+  if (grant.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant grant revocation prohibited.' });
+  }
+  grant.revoked = true;
+  grant.revoked_at = new Date().toISOString();
+  persistDatabase();
+  res.json({ success: true, grant });
+});
+
+app.post('/api/v1/permissions/evaluate', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { agent_id, tool_id, resource, action, requested_scopes, delegation_id } = req.body || {};
+  if (!agent_id || !tool_id) {
+    return res.status(400).json({ error: 'agent_id and tool_id are required.' });
+  }
+  const toolIdentity = dbState.toolIdentities.find(
+    (t) => t.tenant_id === tenantId && (t.tool_id === tool_id || t.name === tool_id)
+  );
+  const delegation = delegation_id
+    ? dbState.delegations.find((d) => d.delegation_id === delegation_id && d.tenant_id === tenantId) || null
+    : null;
+  const result = evaluatePermissionGraph({
+    tenantId,
+    agentId: String(agent_id),
+    toolId: String(tool_id),
+    resource: String(resource || '*'),
+    action: String(action || '*'),
+    requestedScopes: Array.isArray(requested_scopes) ? requested_scopes : [],
+    grants: dbState.permissionGrants,
+    toolIdentity,
+    delegation,
+    strictNoImplicitAllow: true,
+  });
+  res.json(result);
+});
+
+app.get('/api/v1/permissions/graph', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const snapshot = buildPermissionGraphSnapshot({
+    tenantId,
+    agents: dbState.agents.filter((a) => a.tenant_id === tenantId),
+    grants: dbState.permissionGrants,
+    tools: dbState.toolIdentities,
+    delegations: dbState.delegations,
+  });
+  res.json(snapshot);
+});
+
+// Feature 12: MCP Runtime Enforcement Gateway
+app.get('/api/v1/mcp/gateway/upstreams', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.mcpUpstreams.filter((u) => u.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/mcp/gateway/upstreams', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { server_id, tool_id, tool_name, capability, transport, endpoint_url, handler_key, timeout_ms, max_retries, is_idempotent, declared_permissions, declared_endpoints, allow_loopback } = req.body || {};
+  if (!tool_name || !capability) {
+    return res.status(400).json({ error: 'tool_name and capability are required.' });
+  }
+  const effectiveTransport = transport === 'HTTP_JSONRPC' ? 'HTTP_JSONRPC' : 'LOCAL_HANDLER';
+  if (effectiveTransport === 'HTTP_JSONRPC' && (!endpoint_url || !isRadarUrlSafe(String(endpoint_url), Boolean(allow_loopback)))) {
+    return res.status(400).json({ error: 'Valid SSRF-safe endpoint_url required for HTTP_JSONRPC upstream.' });
+  }
+  const upstream: McpUpstreamToolRecord = {
+    upstream_id: `mcpup-${crypto.randomUUID().slice(0, 8)}`,
+    tenant_id: tenantId,
+    server_id: String(server_id || 'mcp-srv-enterprise-db'),
+    tool_id: String(tool_id || tool_name),
+    tool_name: String(tool_name),
+    capability: String(capability),
+    transport: effectiveTransport,
+    endpoint_url: endpoint_url ? String(endpoint_url) : undefined,
+    handler_key: handler_key ? String(handler_key) : 'builtin:echo_verified',
+    timeout_ms: Math.max(200, Math.min(30000, Number(timeout_ms || 4000))),
+    max_retries: Math.max(0, Math.min(3, Number(max_retries || 0))),
+    is_idempotent: Boolean(is_idempotent),
+    declared_permissions: Array.isArray(declared_permissions) ? declared_permissions : [],
+    declared_endpoints: Array.isArray(declared_endpoints) ? declared_endpoints : [],
+    status: 'ACTIVE',
+    created_at: new Date().toISOString(),
+  };
+  dbState.mcpUpstreams.unshift(upstream);
+  persistDatabase();
+  res.status(201).json(upstream);
+});
+
+app.patch('/api/v1/mcp/gateway/upstreams/:id/status', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const up = dbState.mcpUpstreams.find((u) => u.upstream_id === req.params.id);
+  if (!up) return res.status(404).json({ error: 'Upstream tool not found.' });
+  if (up.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant upstream modification prohibited.' });
+  }
+  const nextStatus = req.body?.status;
+  if (!['ACTIVE', 'SUSPENDED', 'REVOKED'].includes(nextStatus)) {
+    return res.status(400).json({ error: 'Valid status (ACTIVE|SUSPENDED|REVOKED) required.' });
+  }
+  up.status = nextStatus;
+  persistDatabase();
+  res.json(up);
+});
+
+app.post('/api/v1/mcp/gateway/invoke', requireAuth(WRITE_ROLES), async (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const body = req.body || {};
+  if (!body.tool_name) {
+    return res.status(400).json({ error: 'tool_name is required.' });
+  }
+  const out = await executeThroughMcpGateway({
+    deps: {
+      upstreams: dbState.mcpUpstreams,
+      toolIdentities: dbState.toolIdentities,
+      toolDrifts: dbState.toolDrifts,
+      permissionGrants: dbState.permissionGrants,
+      freshnessPolicies: dbState.freshnessPolicies,
+      facts: dbState.facts,
+      dependencyNodes: dbState.dependencyNodes,
+      dependencyEdges: dbState.dependencyEdges,
+      delegations: dbState.delegations,
+      invocations: dbState.mcpGatewayInvocations,
+      factObservations: dbState.factObservations,
+      conflictPolicies: dbState.conflictPolicies,
+      secrets: dbState.vaultSecrets,
+      secretLeases: dbState.secretLeases,
+      secretAccessLogs: dbState.secretAccessLogs,
+      invocationContexts: dbState.invocationContexts,
+      dataClassifications: dbState.dataClassifications,
+      dataFlowPolicies: dbState.dataFlowPolicies,
+      egressPolicies: dbState.egressPolicies,
+      egressReceipts: dbState.egressReceipts,
+      behaviorBaselines: dbState.behaviorBaselines,
+      behaviorDrifts: dbState.behaviorDrifts,
+      evaluateActionGate: evaluateActionGateCore,
+      recordGatewayAudit: (a) => recordAuditEntry(a.actionId, a.agentId, a.decision, a.riskScore, a.reason, a.executionStatus, false, a.tenantId),
+    },
+    tenantId,
+    agentId: String(body.agent_id || auth.agentId || 'agt-console'),
+    userId: auth.userId,
+    upstreamId: body.upstream_id,
+    toolId: body.tool_id,
+    toolName: String(body.tool_name),
+    capability: body.capability,
+    target: String(body.target || body.entity_id || 'mcp.resource'),
+    entityId: body.entity_id,
+    requiredFactField: body.required_fact_field,
+    requestedScopes: Array.isArray(body.requested_scopes) ? body.requested_scopes : undefined,
+    delegationId: body.delegation_id,
+    secretRef: body.secret_ref ? String(body.secret_ref) : undefined,
+    secretScope: body.secret_scope ? String(body.secret_scope) : undefined,
+    sessionId: body.session_id ? String(body.session_id) : undefined,
+    parameters: (body.arguments as Record<string, unknown>) || body.parameters || {},
+    traceId: (req.headers['x-trace-id'] as string) || body.trace_id,
+    idempotencyKey: body.idempotency_key,
+    allowLoopbackUpstream: Boolean(body.allow_loopback_upstream),
+  });
+  persistDatabase();
+  res.status(out.allowed ? 200 : 403).json(out);
+});
+
+app.get('/api/v1/mcp/gateway/invocations', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.mcpGatewayInvocations.filter((i) => i.tenant_id === auth.tenantId).slice(0, 100));
+});
+
+// -------------------------------------------------------------
+// Batch 2 API: Conflict Resolver, Smart Revalidation, Secret Broker,
+// Per-Call Isolation, Data Flow Guard, Network Egress, Behavior & Safe Replay
+// -------------------------------------------------------------
+
+// Feature 5: Multi-Source Conflict Resolver
+app.get('/api/v1/conflicts/policies', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.conflictPolicies.filter((p) => p.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/conflicts/policies', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const pol = createConflictResolutionPolicy({
+    tenant_id: tenantId,
+    entity_pattern: req.body?.entity_pattern,
+    field_pattern: req.body?.field_pattern,
+    strategy_order: Array.isArray(req.body?.strategy_order) ? req.body.strategy_order : undefined,
+    trusted_source_order: Array.isArray(req.body?.trusted_source_order) ? req.body.trusted_source_order : undefined,
+    explicit_source_rules: Array.isArray(req.body?.explicit_source_rules) ? req.body.explicit_source_rules : undefined,
+    min_evidence_quality: typeof req.body?.min_evidence_quality === 'number' ? req.body.min_evidence_quality : undefined,
+    on_unresolved_decision: req.body?.on_unresolved_decision,
+  });
+  dbState.conflictPolicies.unshift(pol);
+  persistDatabase();
+  res.status(201).json(pol);
+});
+
+app.get('/api/v1/conflicts/observations', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const entityId = (req.query.entity_id as string) || '';
+  const fieldName = (req.query.field_name as string) || '';
+  const list = dbState.factObservations.filter(
+    (o) =>
+      o.tenant_id === tenantId &&
+      (!entityId || o.entity_id === entityId) &&
+      (!fieldName || o.field_name === fieldName)
+  );
+  res.json(list);
+});
+
+app.post('/api/v1/conflicts/observations', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { entity_id, field_name, value, source_id, source_authority, source_version, verified_at, observed_at, expiry, provenance, evidence_ref, data_quality, source_available } = req.body || {};
+  if (!entity_id || !field_name || !source_id) {
+    return res.status(400).json({ error: 'entity_id, field_name, and source_id are required.' });
+  }
+  const obs = recordMultiSourceObservation({
+    observations: dbState.factObservations,
+    tenantId,
+    entityId: String(entity_id),
+    fieldName: String(field_name),
+    value,
+    sourceId: String(source_id),
+    sourceAuthority: source_authority,
+    sourceVersion: source_version,
+    verifiedAt: verified_at,
+    observedAt: observed_at,
+    expiry,
+    provenance,
+    evidenceRef: evidence_ref,
+    dataQuality: typeof data_quality === 'number' ? data_quality : undefined,
+    sourceAvailable: source_available,
+  });
+
+  const evaluation = evaluateMultiSourceConflict({
+    observations: dbState.factObservations,
+    policies: dbState.conflictPolicies,
+    tenantId,
+    entityId: String(entity_id),
+    fieldName: String(field_name),
+  });
+  dbState.conflictEvaluations.unshift(evaluation);
+  if (dbState.conflictEvaluations.length > 200) dbState.conflictEvaluations.pop();
+
+  if (evaluation.status === 'UNRESOLVED' || evaluation.status === 'INSUFFICIENT_EVIDENCE' || evaluation.status === 'SOURCE_UNAVAILABLE') {
+    const fNode = syncFactToDependencyGraph(tenantId, String(entity_id), String(field_name), 'REVALIDATE_REQUIRED');
+    executeInvalidationCascade({
+      nodes: dbState.dependencyNodes,
+      edges: dbState.dependencyEdges,
+      cascades: dbState.invalidationCascades,
+      tenantId,
+      triggerNodeId: fNode.node_id,
+      targetState: 'REVALIDATE_REQUIRED',
+      reason: evaluation.explanation,
+      traceId: `tr-mconf-${evaluation.evaluation_id}`,
+    });
+  } else if (evaluation.winning_observation) {
+    const existingFact = dbState.facts.find(
+      (f) => f.tenant_id === tenantId && f.entity_id === String(entity_id) && f.field_name === String(field_name)
+    );
+    if (existingFact) {
+      existingFact.value = evaluation.winning_observation.value;
+      existingFact.source = evaluation.winning_observation.source_id;
+      existingFact.state = 'VALID';
+      existingFact.observed_at = evaluation.winning_observation.observed_at;
+    } else {
+      dbState.facts.unshift({
+        entity_id: String(entity_id),
+        field_name: String(field_name),
+        value: evaluation.winning_observation.value,
+        source: evaluation.winning_observation.source_id,
+        observed_at: evaluation.winning_observation.observed_at,
+        version: 1,
+        state: 'VALID',
+        ttl_seconds: 300,
+        tenant_id: tenantId,
+        field_fingerprint: crypto
+          .createHash('sha256')
+          .update(`${entity_id}:${field_name}=${JSON.stringify(evaluation.winning_observation.value)}`)
+          .digest('hex'),
+      });
+    }
+  }
+
+  persistDatabase();
+  res.status(201).json({ observation: obs, evaluation });
+});
+
+app.post('/api/v1/conflicts/evaluate', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { entity_id, field_name, manual_winner_observation_id } = req.body || {};
+  if (!entity_id || !field_name) {
+    return res.status(400).json({ error: 'entity_id and field_name are required.' });
+  }
+  const evaluation = evaluateMultiSourceConflict({
+    observations: dbState.factObservations,
+    policies: dbState.conflictPolicies,
+    tenantId,
+    entityId: String(entity_id),
+    fieldName: String(field_name),
+    manualWinnerObservationId: manual_winner_observation_id,
+  });
+  dbState.conflictEvaluations.unshift(evaluation);
+  if (dbState.conflictEvaluations.length > 200) dbState.conflictEvaluations.pop();
+  persistDatabase();
+  res.json(evaluation);
+});
+
+app.get('/api/v1/conflicts/evaluations', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.conflictEvaluations.filter((e) => e.tenant_id === auth.tenantId).slice(0, 60));
+});
+
+// Feature 6: Smart Revalidation & Delta Refresh
+app.get('/api/v1/revalidation/plans', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.revalidationPlans.filter((p) => p.tenant_id === auth.tenantId).slice(0, 60));
+});
+
+app.post('/api/v1/revalidation/plan-and-run', requireAuth(WRITE_ROLES), async (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const b = req.body || {};
+  const result = await planAndExecuteSmartRevalidation({
+    tenantId,
+    triggerReason: String(b.trigger_reason || 'manual_smart_revalidation'),
+    mode: b.mode,
+    entityId: b.entity_id,
+    fieldName: b.field_name,
+    sourceId: b.source_id,
+    refreshBudget: typeof b.refresh_budget === 'number' ? b.refresh_budget : undefined,
+    maxRetries: typeof b.max_retries === 'number' ? b.max_retries : undefined,
+    timeoutMs: typeof b.timeout_ms === 'number' ? b.timeout_ms : undefined,
+    allowLoopbackForTest: Boolean(b.allow_loopback),
+    inlineUpdates: Array.isArray(b.inline_updates) ? b.inline_updates : undefined,
+    simulateSourceFailure: typeof b.simulate_source_failure === 'string' ? b.simulate_source_failure : undefined,
+    facts: dbState.facts,
+    freshnessPolicies: dbState.freshnessPolicies,
+    dependencyNodes: dbState.dependencyNodes,
+    dependencyEdges: dbState.dependencyEdges,
+    changeSources: dbState.changeSources,
+    observations: dbState.factObservations,
+    conflictPolicies: dbState.conflictPolicies,
+  });
+  dbState.revalidationPlans.unshift(result.plan);
+  if (dbState.revalidationPlans.length > 100) dbState.revalidationPlans.pop();
+  for (const ce of result.conflict_evaluations) {
+    dbState.conflictEvaluations.unshift(ce);
+  }
+  persistDatabase();
+  res.status(result.plan.status === 'FAILED_FAIL_CLOSED' || result.plan.status === 'RATE_LIMITED' ? 502 : 200).json(result);
+});
+
+// Feature 13: Ephemeral Secret Broker
+app.get('/api/v1/secrets', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.vaultSecrets.filter((s) => s.tenant_id === auth.tenantId).map(sanitizeSecretSummary));
+});
+
+app.post('/api/v1/secrets', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { principal_id, provider, secret_value, secret_ref, allowed_tools, allowed_scopes, allowed_resources, expires_at } = req.body || {};
+  if (!secret_value || typeof secret_value !== 'string') {
+    return res.status(400).json({ error: 'secret_value string is required.' });
+  }
+  const rec = registerVaultSecret({
+    secrets: dbState.vaultSecrets,
+    accessLogs: dbState.secretAccessLogs,
+    tenantId,
+    principalId: String(principal_id || auth.userId || 'principal-default'),
+    provider: String(provider || 'api-credential'),
+    rawSecretValue: secret_value,
+    secretRef: secret_ref ? String(secret_ref) : undefined,
+    allowedTools: Array.isArray(allowed_tools) ? allowed_tools.map(String) : ['*'],
+    allowedScopes: Array.isArray(allowed_scopes) ? allowed_scopes.map(String) : ['*'],
+    allowedResources: Array.isArray(allowed_resources) ? allowed_resources.map(String) : ['*'],
+    expiresAt: expires_at ? String(expires_at) : undefined,
+  });
+  persistDatabase();
+  res.status(201).json(sanitizeSecretSummary(rec));
+});
+
+app.post('/api/v1/secrets/lease', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { secret_ref, principal_id, agent_id, tool_id, session_id, requested_scope, resource_scope, purpose, ttl_seconds } = req.body || {};
+  if (!secret_ref || !agent_id || !tool_id || !requested_scope) {
+    return res.status(400).json({ error: 'secret_ref, agent_id, tool_id, and requested_scope are required.' });
+  }
+  const out = issueEphemeralSecretLease({
+    secrets: dbState.vaultSecrets,
+    leases: dbState.secretLeases,
+    accessLogs: dbState.secretAccessLogs,
+    tenantId,
+    principalId: String(principal_id || agent_id),
+    agentId: String(agent_id),
+    toolId: String(tool_id),
+    secretRef: String(secret_ref),
+    sessionId: String(session_id || `sess-${crypto.randomUUID().slice(0, 8)}`),
+    requestedScope: String(requested_scope),
+    resourceScope: resource_scope ? String(resource_scope) : '*',
+    purpose: String(purpose || 'runtime_tool_invocation'),
+    ttlSeconds: typeof ttl_seconds === 'number' ? ttl_seconds : 60,
+  });
+  persistDatabase();
+  if (!out.ok) {
+    return res.status(403).json(out);
+  }
+  res.status(201).json(out);
+});
+
+app.post('/api/v1/secrets/revoke', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const out = revokeSecretOrLease({
+    secrets: dbState.vaultSecrets,
+    leases: dbState.secretLeases,
+    accessLogs: dbState.secretAccessLogs,
+    tenantId,
+    secretRef: req.body?.secret_ref,
+    leaseId: req.body?.lease_id,
+    reason: req.body?.reason,
+  });
+  persistDatabase();
+  if (!out.ok) {
+    return res.status(out.error?.includes('Cross-tenant') ? 403 : 400).json(out);
+  }
+  res.json(out);
+});
+
+app.get('/api/v1/secrets/leases', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.secretLeases.filter((l) => l.tenant_id === auth.tenantId).slice(0, 100));
+});
+
+app.get('/api/v1/secrets/audit', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.secretAccessLogs.filter((a) => a.tenant_id === auth.tenantId).slice(0, 120));
+});
+
+// Feature 14: Per-Call Isolation Ledger
+app.get('/api/v1/isolation/invocations', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.invocationContexts.filter((c) => c.tenant_id === auth.tenantId).slice(0, 100));
+});
+
+// Feature 15: Data Flow & Leakage Guard
+app.get('/api/v1/data-flow/classifications', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.dataClassifications.filter((c) => c.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/data-flow/classifications', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { label, tier, field_paths, value_categories, description } = req.body || {};
+  if (!label || !tier || !Array.isArray(field_paths)) {
+    return res.status(400).json({ error: 'label, tier, and field_paths[] are required.' });
+  }
+  const rule = createDataClassificationRule({
+    tenant_id: tenantId,
+    label: String(label),
+    tier,
+    field_paths: field_paths.map(String),
+    value_categories,
+    description,
+  });
+  dbState.dataClassifications.unshift(rule);
+  persistDatabase();
+  res.status(201).json(rule);
+});
+
+app.get('/api/v1/data-flow/policies', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.dataFlowPolicies.filter((p) => p.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/data-flow/policies', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { name, source_scope, allowed_destinations, blocked_destinations, max_allowed_tier, redaction_mode, block_unclassified_sensitive } = req.body || {};
+  if (!name) return res.status(400).json({ error: 'Policy name is required.' });
+  const pol = createDataFlowPolicy({
+    tenant_id: tenantId,
+    name: String(name),
+    source_scope,
+    allowed_destinations,
+    blocked_destinations,
+    max_allowed_tier,
+    redaction_mode,
+    block_unclassified_sensitive,
+  });
+  dbState.dataFlowPolicies.unshift(pol);
+  persistDatabase();
+  res.status(201).json(pol);
+});
+
+app.post('/api/v1/data-flow/evaluate', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { destination, payload, explicit_labels } = req.body || {};
+  const result = evaluateDataFlowGuard({
+    tenantId,
+    destination: String(destination || 'external.unclassified'),
+    payload: (payload as Record<string, unknown>) || {},
+    classifications: dbState.dataClassifications,
+    policies: dbState.dataFlowPolicies,
+    explicitSensitivityLabels: Array.isArray(explicit_labels) ? explicit_labels : undefined,
+  });
+  dbState.dataFlowEvaluations.unshift(result);
+  if (dbState.dataFlowEvaluations.length > 150) dbState.dataFlowEvaluations.pop();
+  persistDatabase();
+  res.status(result.decision === 'BLOCK' ? 403 : 200).json(result);
+});
+
+app.get('/api/v1/data-flow/evaluations', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.dataFlowEvaluations.filter((e) => e.tenant_id === auth.tenantId).slice(0, 80));
+});
+
+// Feature 16: Network Egress Control
+app.get('/api/v1/egress/policies', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.egressPolicies.filter((p) => p.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/egress/policies', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const b = req.body || {};
+  const pol = createNetworkEgressPolicy({
+    tenant_id: tenantId,
+    tool_id: b.tool_id,
+    agent_id: b.agent_id,
+    hostname_allowlist: b.hostname_allowlist,
+    allowed_domains: b.allowed_domains,
+    denied_domains: b.denied_domains,
+    allowed_ports: b.allowed_ports,
+    denied_ports: b.denied_ports,
+    protocol_rules: b.protocol_rules,
+    block_private_ips: b.block_private_ips,
+    block_loopback: b.block_loopback,
+    block_link_local: b.block_link_local,
+    block_metadata: b.block_metadata,
+    allowed_ips: b.allowed_ips,
+    allow_loopback_for_test: b.allow_loopback_for_test,
+    redirect_policy: b.redirect_policy,
+    max_redirects: b.max_redirects,
+    method_policy: b.method_policy,
+    require_tls_in_prod: b.require_tls_in_prod,
+  });
+  dbState.egressPolicies.unshift(pol);
+  persistDatabase();
+  res.status(201).json(pol);
+});
+
+app.post('/api/v1/egress/evaluate', requireAuth(WRITE_ROLES), async (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { tool_id, agent_id, url, method, allow_loopback } = req.body || {};
+  if (!url) return res.status(400).json({ error: 'url is required.' });
+  const evalRes = await evaluateNetworkEgress({
+    tenantId,
+    toolId: String(tool_id || '*'),
+    agentId: String(agent_id || auth.agentId || '*'),
+    url: String(url),
+    method: method ? String(method) : 'POST',
+    policies: dbState.egressPolicies,
+    receiptsLedger: dbState.egressReceipts,
+    allowLoopbackForTest: Boolean(allow_loopback),
+  });
+  persistDatabase();
+  res.status(evalRes.allowed ? 200 : 403).json(evalRes);
+});
+
+app.post('/api/v1/egress/fetch-check', requireAuth(WRITE_ROLES), async (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { tool_id, agent_id, url, method, allow_loopback } = req.body || {};
+  if (!url) return res.status(400).json({ error: 'url is required.' });
+  const out = await governedEgressFetch({
+    tenantId,
+    toolId: String(tool_id || '*'),
+    agentId: String(agent_id || auth.agentId || '*'),
+    url: String(url),
+    method: method ? String(method) : 'GET',
+    policies: dbState.egressPolicies,
+    receiptsLedger: dbState.egressReceipts,
+    allowLoopbackForTest: Boolean(allow_loopback),
+  });
+  persistDatabase();
+  res.status(out.ok ? 200 : 403).json({
+    ok: out.ok,
+    status: out.response?.status,
+    receipt: out.receipt,
+    error: out.error,
+  });
+});
+
+app.get('/api/v1/egress/receipts', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.egressReceipts.filter((r) => r.tenant_id === auth.tenantId).slice(0, 100));
+});
+
+// Feature 17: Runtime Behavior Baseline & Safe Replay
+app.get('/api/v1/behavior/baselines', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.behaviorBaselines.filter((b) => b.tenant_id === auth.tenantId));
+});
+
+app.get('/api/v1/behavior/drifts', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.behaviorDrifts.filter((d) => d.tenant_id === auth.tenantId).slice(0, 100));
+});
+
+app.post('/api/v1/behavior/observe', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { tool_id, tool_version, observed_permission, observed_destination, observed_data_tier, had_error } = req.body || {};
+  if (!tool_id) return res.status(400).json({ error: 'tool_id is required.' });
+  const out = upsertAndRecordBehaviorBaseline({
+    baselines: dbState.behaviorBaselines,
+    driftEvents: dbState.behaviorDrifts,
+    toolIdentities: dbState.toolIdentities,
+    tenantId,
+    toolId: String(tool_id),
+    toolVersion: tool_version ? String(tool_version) : undefined,
+    observedPermission: observed_permission,
+    observedDestination: observed_destination,
+    observedDataTier: observed_data_tier,
+    hadError: Boolean(had_error),
+  });
+  persistDatabase();
+  res.json(out);
+});
+
+app.get('/api/v1/replay-packs/safe', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.safeReplayPacks.filter((p) => p.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/replay-packs/safe', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  try {
+    const pack = createSafeReplayPack({
+      tenant_id: tenantId,
+      incident_id: req.body?.incident_id,
+      name: String(req.body?.name || 'Safe Regression Pack'),
+      version: req.body?.version,
+      tool_id: String(req.body?.tool_id || 'default-tool'),
+      agent_id: String(req.body?.agent_id || auth.agentId || 'agt-console'),
+      mode: req.body?.mode,
+      sanitized_actions: Array.isArray(req.body?.sanitized_actions) ? req.body.sanitized_actions : [],
+    });
+    dbState.safeReplayPacks.unshift(pack);
+    persistDatabase();
+    res.status(201).json(pack);
+  } catch (err: unknown) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid replay pack specification.' });
+  }
+});
+
+app.post('/api/v1/replay-packs/safe/:id/run', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const pack = dbState.safeReplayPacks.find((p) => p.replay_pack_id === req.params.id);
+  if (!pack) return res.status(404).json({ error: 'Safe replay pack not found.' });
+  if (pack.tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant replay execution prohibited.' });
+  }
+  const runResult = executeSafeReplayPack({
+    pack,
+    evaluateGateDryRun: (actionInput) => evaluateActionGateCore({ ...actionInput, tenant_id: auth.tenantId }),
+  });
+  persistDatabase();
+  res.json({ replay_pack: pack, run_result: runResult });
+});
+
+// -------------------------------------------------------------
+// Batch 3 — Feature 7: Public & Private Source Health Profiles
+// -------------------------------------------------------------
+app.get('/api/v1/sources/health', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.sourceHealthProfiles.filter((p) => p.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/sources/:sourceId/health/compute', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const source = dbState.changeSources.find((s) => s.source_id === req.params.sourceId);
+  if (!source) {
+    return res.status(404).json({ error: 'Change source not found.' });
+  }
+  if (source.tenant_id !== tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant source health access prohibited.' });
+  }
+  const existing = dbState.sourceHealthProfiles.find(
+    (p) => p.source_id === source.source_id && p.tenant_id === tenantId
+  );
+  const wantPublic = typeof req.body?.is_public === 'boolean' ? Boolean(req.body.is_public) : undefined;
+  const computed = computeSourceHealthProfile({
+    tenantId,
+    source,
+    events: dbState.changeEvents,
+    failedEvents: dbState.failedChangeEvents,
+    facts: dbState.facts,
+    revalidationPlans: dbState.revalidationPlans,
+    connectorVersion: req.body?.connector_version || existing?.connector_version || 'cck-connector-v1',
+    existingProfile: existing,
+    isPublic: wantPublic,
+    consentGrantedBy: wantPublic ? auth.username : undefined,
+    minSampleThreshold: typeof req.body?.min_sample_threshold === 'number' ? req.body.min_sample_threshold : 5,
+  });
+
+  if (existing) {
+    const idx = dbState.sourceHealthProfiles.indexOf(existing);
+    dbState.sourceHealthProfiles[idx] = computed;
+  } else {
+    dbState.sourceHealthProfiles.unshift(computed);
+  }
+  persistDatabase();
+  res.status(200).json(computed);
+});
+
+app.patch('/api/v1/sources/:sourceId/health/visibility', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const profile = dbState.sourceHealthProfiles.find((p) => p.source_id === req.params.sourceId);
+  if (!profile) {
+    return res.status(404).json({ error: 'Source health profile not found. Compute profile first.' });
+  }
+  if (profile.tenant_id !== tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant source visibility change prohibited.' });
+  }
+  const { is_public, explicit_consent } = req.body || {};
+  if (Boolean(is_public) && explicit_consent !== true) {
+    return res.status(400).json({
+      error: 'CONSENT_REQUIRED',
+      detail: 'Making a Source Health Profile public requires explicit_consent: true.',
+    });
+  }
+  profile.is_public = Boolean(is_public);
+  profile.public_consent_granted = Boolean(is_public);
+  if (profile.is_public) {
+    profile.public_consent_by = auth.username;
+    profile.public_consent_at = new Date().toISOString();
+  }
+  profile.last_profile_update = new Date().toISOString();
+  persistDatabase();
+  res.json(profile);
+});
+
+app.get('/api/v1/public/sources/health', (_req: Request, res: Response) => {
+  const publicProfiles = dbState.sourceHealthProfiles
+    .map((p) => toPublicSourceHealthProfile(p))
+    .filter((v): v is NonNullable<typeof v> => v !== null);
+  res.json(publicProfiles);
+});
+
+app.get('/api/v1/public/sources/:sourceId/health', (req: Request, res: Response) => {
+  const profile = dbState.sourceHealthProfiles.find((p) => p.source_id === req.params.sourceId);
+  if (!profile) {
+    return res.status(404).json({ error: 'Source health profile not found.' });
+  }
+  const pubView = toPublicSourceHealthProfile(profile);
+  if (!pubView) {
+    return res.status(403).json({ error: 'PRIVATE_PROFILE', detail: 'This Source Health Profile is private and has not opted into public sharing.' });
+  }
+  res.json(pubView);
+});
+
+// -------------------------------------------------------------
+// Batch 3 — Feature 8: Connector SDK & 12-Check Test Harness
+// -------------------------------------------------------------
+app.get('/api/v1/connectors/harness/reports', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.connectorHarnessReports.filter((r) => r.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/connectors/harness/run', requireAuth(WRITE_ROLES), async (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const manifest = req.body?.manifest as ConnectorManifest | undefined;
+  if (!manifest) {
+    return res.status(400).json({ error: 'manifest object is required.' });
+  }
+  const connector = createDeclarativeSdkConnector({
+    manifest,
+    sampleItems: Array.isArray(req.body?.sample_items) ? req.body.sample_items : undefined,
+  });
+  const report = await runConnectorTestHarness({
+    connector,
+    tenantId,
+    target: req.body?.target || 'entity:sample-100',
+  });
+  dbState.connectorHarnessReports.unshift(report);
+  persistDatabase();
+  res.status(201).json(report);
+});
+
+app.get('/api/v1/connectors/submissions', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.connectorSubmissions.filter((s) => s.tenant_id === auth.tenantId || s.review_status === 'VERIFIED'));
+});
+
+app.post('/api/v1/connectors/submissions', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { manifest, harness_report_id } = req.body || {};
+  if (!manifest || !harness_report_id) {
+    return res.status(400).json({ error: 'manifest and harness_report_id are required.' });
+  }
+  const validation = validateConnectorManifest(manifest);
+  if (!validation.valid) {
+    return res.status(400).json({ error: 'INVALID_MANIFEST', details: validation.errors });
+  }
+  const harnessReport = dbState.connectorHarnessReports.find(
+    (r) => r.report_id === harness_report_id && r.tenant_id === tenantId
+  );
+  if (!harnessReport) {
+    return res.status(404).json({ error: 'Harness verification report not found for this tenant.' });
+  }
+  const submission = buildConnectorSubmissionRecord({
+    tenantId,
+    manifest,
+    harnessReport,
+    submittedBy: auth.username,
+  });
+  dbState.connectorSubmissions.unshift(submission);
+  recordAdoptionEvent({ analytics: dbState.adoptionAnalytics, eventType: 'CONNECTOR_SUBMITTED' });
+  if (submission.harness_passed) {
+    recordAdoptionEvent({ analytics: dbState.adoptionAnalytics, eventType: 'CONNECTOR_VERIFIED' });
+  }
+  persistDatabase();
+  res.status(201).json(submission);
+});
+
+app.post('/api/v1/connectors/submissions/:id/consume-ingest', requireAuth(WRITE_ROLES), async (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const sub = dbState.connectorSubmissions.find((s) => s.submission_id === req.params.id);
+  if (!sub) return res.status(404).json({ error: 'Connector submission not found.' });
+  if (sub.tenant_id !== tenantId && sub.review_status !== 'VERIFIED') {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Cross-tenant unverified connector execution prohibited.' });
+  }
+  if (!sub.harness_passed) {
+    return res.status(400).json({ error: 'CONNECTOR_NOT_VERIFIED', detail: 'Connector must pass the test harness before CCK ingestion.' });
+  }
+
+  const connector = createDeclarativeSdkConnector({
+    manifest: sub.manifest,
+    sampleItems: Array.isArray(req.body?.items) ? req.body.items : undefined,
+  });
+  const fetchRes = await connector.fetch(
+    { tenant_id: tenantId, secret_lease: { lease_id: 'seclease_ingest', token: 'valid_runtime_lease' } },
+    String(req.body?.target || 'entity:sample-100')
+  );
+  const normFacts = connector.normalizeFacts({ tenant_id: tenantId }, fetchRes);
+  const normEv = connector.normalizeEvidence({ tenant_id: tenantId }, fetchRes);
+
+  // Persist normalized facts & evidence directly into CCK core registries + Change Radar
+  let source = dbState.changeSources.find(
+    (s) => s.tenant_id === tenantId && s.source_id === sub.manifest.connector_id
+  );
+  const nowIso = new Date().toISOString();
+  if (!source) {
+    source = {
+      source_id: sub.manifest.connector_id,
+      tenant_id: tenantId,
+      name: sub.manifest.name,
+      source_type: sub.manifest.supported_source_types[0] || 'API_POLL',
+      poll_interval_seconds: 60,
+      consecutive_failures: 0,
+      status: 'ACTIVE',
+      last_success_at: nowIso,
+      rate_limit_per_minute: 120,
+      schema_version: sub.manifest.version,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+    dbState.changeSources.unshift(source);
+  } else {
+    source.last_success_at = nowIso;
+    source.updated_at = nowIso;
+    source.status = 'ACTIVE';
+  }
+
+  for (const nf of normFacts) {
+    const existingFact = dbState.facts.find(
+      (f) => f.entity_id === nf.entity_id && f.field_name === nf.field_name && (!f.tenant_id || f.tenant_id === tenantId)
+    );
+    const fingerprint = crypto.createHash('sha256').update(`${nf.entity_id}:${nf.field_name}`).digest('hex').slice(0, 16);
+    if (existingFact) {
+      existingFact.value = nf.value;
+      existingFact.version = nf.version;
+      existingFact.observed_at = nf.observed_at;
+      existingFact.state = 'VALID';
+      existingFact.source = nf.source;
+    } else {
+      dbState.facts.unshift({
+        entity_id: nf.entity_id,
+        field_name: nf.field_name,
+        value: nf.value,
+        source: nf.source,
+        observed_at: nf.observed_at,
+        version: nf.version,
+        state: 'VALID',
+        ttl_seconds: nf.ttl_seconds,
+        field_fingerprint: fingerprint,
+        tenant_id: tenantId,
+      });
+    }
+    const ev = normalizeChangeEvent({
+      tenant_id: tenantId,
+      source_id: sub.manifest.connector_id,
+      entity_id: nf.entity_id,
+      field_name: nf.field_name,
+      value: nf.value,
+      version: nf.version,
+      event_timestamp: nf.observed_at,
+    });
+    dbState.changeEvents.unshift(ev);
+  }
+  for (const ne of normEv) {
+    dbState.evidenceList.unshift({
+      evidence_id: `ev-${crypto.randomUUID().slice(0, 8)}`,
+      entity_id: ne.entity_id,
+      field_name: ne.field_name,
+      raw_payload: ne.raw_payload_redacted,
+      source: ne.source,
+      observed_at: ne.observed_at,
+      payload_hash: ne.payload_hash,
+      metadata: { tenant_id: tenantId, connector_id: sub.manifest.connector_id },
+    });
+  }
+
+  // Recompute Source Health Profile automatically on unified connector ingestion
+  const existingProfile = dbState.sourceHealthProfiles.find(
+    (p) => p.source_id === source!.source_id && p.tenant_id === tenantId
+  );
+  const updatedHealth = computeSourceHealthProfile({
+    tenantId,
+    source,
+    events: dbState.changeEvents,
+    failedEvents: dbState.failedChangeEvents,
+    facts: dbState.facts,
+    connectorVersion: sub.manifest.version,
+    existingProfile,
+  });
+  if (existingProfile) {
+    dbState.sourceHealthProfiles[dbState.sourceHealthProfiles.indexOf(existingProfile)] = updatedHealth;
+  } else {
+    dbState.sourceHealthProfiles.unshift(updatedHealth);
+  }
+
+  persistDatabase();
+  res.json({
+    ingested_facts: normFacts.length,
+    ingested_evidence: normEv.length,
+    source_id: source.source_id,
+    source_health_profile_id: updatedHealth.profile_id,
+  });
+});
+
+// -------------------------------------------------------------
+// Batch 3 — Feature 18: Opt-In Sanitized Scanner Reports API
+// -------------------------------------------------------------
+app.get('/api/v1/scanner/reports', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.sanitizedScanReports.filter((r) => r.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/scanner/reports', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { report, consent_upload } = req.body || {};
+  if (consent_upload !== true) {
+    return res.status(400).json({
+      error: 'UPLOAD_CONSENT_REQUIRED',
+      detail: 'CCK Scanner runs local-only by default. Pass consent_upload: true to submit a sanitized report.',
+    });
+  }
+  if (!report || typeof report !== 'object') {
+    return res.status(400).json({ error: 'report object is required.' });
+  }
+  const sanitized = sanitizeScanReportForUpload(report as ScanReport);
+  const saved = { ...sanitized, uploaded_to_cloud: true, tenant_id: tenantId };
+  dbState.sanitizedScanReports.unshift(saved);
+  recordAdoptionEvent({ analytics: dbState.adoptionAnalytics, eventType: 'CLI_SCAN' });
+  recordAdoptionEvent({ analytics: dbState.adoptionAnalytics, eventType: 'LOCAL_TO_INTEGRATION' });
+  persistDatabase();
+  res.status(201).json(saved);
+});
+
+// -------------------------------------------------------------
+// Batch 3 — Feature 19: CCK GitHub PR Guardian API
+// -------------------------------------------------------------
+app.get('/api/v1/pr-guardian/reports', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  res.json(dbState.prGuardianReports.filter((r) => r.tenant_id === auth.tenantId));
+});
+
+app.post('/api/v1/pr-guardian/evaluate', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const {
+    repository,
+    pr_number,
+    base_sha,
+    head_sha,
+    changed_files,
+    base_tools,
+    head_tools,
+    coverage_available,
+    fail_on_severity,
+    replay_fixtures,
+  } = req.body || {};
+
+  const report = evaluatePullRequestGuardian({
+    tenantId,
+    repository: String(repository || 'unknown/repo'),
+    prNumber: typeof pr_number === 'number' ? pr_number : undefined,
+    baseSha: String(base_sha || ''),
+    headSha: String(head_sha || ''),
+    changedFiles: Array.isArray(changed_files) ? changed_files.map(String) : [],
+    baseTools: Array.isArray(base_tools) ? base_tools : [],
+    headTools: Array.isArray(head_tools) ? head_tools : [],
+    coverageAvailable: coverage_available !== false,
+    failOnSeverity: fail_on_severity === 'HIGH' ? 'HIGH' : 'CRITICAL',
+    replayFixtures: Array.isArray(replay_fixtures) ? replay_fixtures : [],
+  });
+
+  dbState.prGuardianReports.unshift(report);
+  recordAdoptionEvent({ analytics: dbState.adoptionAnalytics, eventType: 'GITHUB_GUARDIAN_INSTALL' });
+  persistDatabase();
+  res.status(201).json(report);
+});
+
+// -------------------------------------------------------------
+// Batch 3 — Feature 20: CCK Trust Profile & Public Registry + Ed25519 Verification + Badges
+// -------------------------------------------------------------
+app.post('/api/v1/trust/publisher-challenge', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const { artifact_identity, publisher_name } = req.body || {};
+  if (!artifact_identity || !publisher_name) {
+    return res.status(400).json({ error: 'artifact_identity and publisher_name are required.' });
+  }
+  const existingClaim = dbState.publisherClaims.find((c) => c.artifact_identity === artifact_identity);
+  if (existingClaim && existingClaim.owner_tenant_id !== tenantId) {
+    return res.status(403).json({ error: 'PUBLISHER_OWNERSHIP_CONFLICT', detail: 'Artifact identity is owned by another publisher.' });
+  }
+  const proofToken = createPublisherChallengeProof({
+    tenantId,
+    artifactIdentity: String(artifact_identity),
+    publisherName: String(publisher_name),
+    hmacSecret: CCK_SIGNING_SECRET,
+  });
+  res.json({
+    artifact_identity,
+    publisher_name,
+    ownership_proof_token: proofToken,
+    method: 'HMAC_CHALLENGE',
+  });
+});
+
+app.get('/api/v1/trust/profiles', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const list = dbState.trustProfiles
+    .filter((p) => p.owner_tenant_id === auth.tenantId)
+    .map((p) => ({
+      ...p,
+      status: computeEffectiveTrustStatus(p, dbState.trustProfiles),
+    }));
+  res.json(list);
+});
+
+const trustSubmissionBuckets = new Map<string, { count: number; resetAt: number }>();
+
+app.post('/api/v1/trust/profiles', requireAuth(WRITE_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const mismatch = enforceTenantBodyMatch(req, auth);
+  if (mismatch) return res.status(403).json({ error: 'FORBIDDEN', detail: mismatch });
+  const tenantId = auth.tenantId;
+  const nowMs = Date.now();
+  const rawOverride = Number(req.headers['x-cck-test-rate-limit']);
+  const maxSubs = Number.isFinite(rawOverride) && rawOverride > 0 ? Math.min(20, Math.floor(rawOverride)) : 20;
+  const bucket = trustSubmissionBuckets.get(tenantId);
+  if (!bucket || nowMs > bucket.resetAt) {
+    trustSubmissionBuckets.set(tenantId, { count: 1, resetAt: nowMs + 60_000 });
+  } else {
+    bucket.count += 1;
+    if (bucket.count > maxSubs) {
+      return res.status(429).json({
+        error: 'TRUST_SUBMISSION_RATE_LIMITED',
+        detail: `Submission rate limit (${maxSubs}/min) exceeded for tenant.`,
+      });
+    }
+  }
+  const {
+    visibility = 'PRIVATE',
+    artifact_identity,
+    artifact_type = 'MCP_TOOL',
+    name,
+    publisher_name,
+    claimed_identity,
+    ownership_proof_token,
+    version,
+    fingerprint,
+    commit_sha,
+    connector_version,
+    test_suite_version = 'cck-harness-v1',
+    policy_version = 'cck-pr-policy-v1',
+    scanner_version = '0.3.0-local',
+    source_health_ref,
+    scope_of_assessment,
+    assessment_statement,
+    findings = [],
+    passed_checks = [],
+    failed_checks = [],
+    unsupported_checks = [],
+    ttl_days = 90,
+  } = req.body || {};
+
+  if (!artifact_identity || !name || !publisher_name || !version || !fingerprint) {
+    return res.status(400).json({ error: 'artifact_identity, name, publisher_name, version, and fingerprint are required.' });
+  }
+
+  // Anti-spam & Duplicate artifact version check
+  const duplicate = dbState.trustProfiles.find(
+    (p) =>
+      p.artifact_identity === artifact_identity &&
+      p.version === version &&
+      p.fingerprint === fingerprint &&
+      p.status !== 'REVOKED'
+  );
+  if (duplicate) {
+    return res.status(409).json({
+      error: 'DUPLICATE_ARTIFACT_VERSION',
+      detail: `A Trust Profile already exists for ${artifact_identity}@${version} with matching fingerprint.`,
+      existing_profile_id: duplicate.profile_id,
+    });
+  }
+
+  // Publisher Ownership Enforcement
+  const ownership = evaluatePublisherOwnership({
+    claims: dbState.publisherClaims,
+    tenantId,
+    artifactIdentity: String(artifact_identity),
+    publisherName: String(publisher_name),
+    claimedIdentity: String(claimed_identity || publisher_name),
+    ownershipProofToken: ownership_proof_token,
+    hmacSecret: CCK_SIGNING_SECRET,
+  });
+  if (!ownership.allowed) {
+    return res.status(403).json({
+      error: 'PUBLISHER_OWNERSHIP_CONFLICT',
+      detail: ownership.reason,
+    });
+  }
+
+  const created = createSignedTrustProfile({
+    ownerTenantId: tenantId,
+    visibility: visibility === 'PUBLIC' ? 'PUBLIC' : 'PRIVATE',
+    artifactIdentity: String(artifact_identity),
+    artifactType: artifact_type,
+    name: String(name),
+    publisherName: String(publisher_name),
+    claimedIdentity: String(claimed_identity || publisher_name),
+    publisherVerification: ownership.verification,
+    version: String(version),
+    fingerprint: String(fingerprint),
+    commitSha: commit_sha,
+    connectorVersion: connector_version,
+    testSuiteVersion: String(test_suite_version),
+    policyVersion: String(policy_version),
+    scannerVersion: String(scanner_version),
+    sourceHealthRef: source_health_ref,
+    scopeOfAssessment: scope_of_assessment || {
+      tested_capabilities: passed_checks,
+      included_checks: ['tool_identity_fingerprint', 'static_config_scan'],
+      excluded_or_not_tested: ['live_production_traffic'],
+    },
+    assessmentStatement: assessment_statement,
+    findings,
+    passedChecks: passed_checks,
+    failedChecks: failed_checks,
+    unsupportedChecks: unsupported_checks,
+    ttlDays: typeof ttl_days === 'number' ? ttl_days : 90,
+  });
+
+  if (!created.ok) {
+    return res.status(400).json(created);
+  }
+
+  // Automatically supersede any prior active profile for the same artifact_identity
+  for (const prev of dbState.trustProfiles) {
+    if (
+      prev.artifact_identity === created.profile.artifact_identity &&
+      prev.status !== 'REVOKED' &&
+      prev.status !== 'SUPERSEDED'
+    ) {
+      prev.status = 'SUPERSEDED';
+      prev.superseded_by_profile_id = created.profile.profile_id;
+      prev.updated_at = new Date().toISOString();
+    }
+  }
+
+  dbState.trustProfiles.unshift(created.profile);
+  if (created.profile.visibility === 'PUBLIC') {
+    recordAdoptionEvent({ analytics: dbState.adoptionAnalytics, eventType: 'REPORT_PUBLISHED' });
+  }
+  persistDatabase();
+  res.status(201).json(created.profile);
+});
+
+app.post('/api/v1/trust/profiles/:id/revoke', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  const auth = req.cckAuth!;
+  const profile = dbState.trustProfiles.find((p) => p.profile_id === req.params.id);
+  if (!profile) return res.status(404).json({ error: 'Trust Profile not found.' });
+  if (profile.owner_tenant_id !== auth.tenantId) {
+    return res.status(403).json({ error: 'FORBIDDEN', detail: 'Only the owning publisher tenant can revoke this Trust Profile.' });
+  }
+  profile.status = 'REVOKED';
+  profile.revoked_at = new Date().toISOString();
+  profile.revoke_reason = String(req.body?.reason || 'Revoked by publisher');
+  profile.updated_at = profile.revoked_at;
+  persistDatabase();
+  res.json(profile);
+});
+
+// Public Registry Discovery (Search & Filter — Strictly Public Profiles, Zero Tenant Leakage)
+app.get('/api/v1/trust/registry', (req: Request, res: Response) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const typeFilter = String(req.query.type || '').trim();
+  const statusFilter = String(req.query.status || '').trim();
+  const publisherFilter = String(req.query.publisher || '').trim().toLowerCase();
+  const capabilityFilter = String(req.query.capability || '').trim().toLowerCase();
+
+  const items = dbState.trustProfiles
+    .filter((p) => p.visibility === 'PUBLIC')
+    .map((p) => toPublicTrustProfile(p, dbState.trustProfiles))
+    .filter((p) => {
+      if (typeFilter && p.artifact_type !== typeFilter) return false;
+      if (statusFilter && p.status !== statusFilter) return false;
+      if (publisherFilter && !p.publisher_name.toLowerCase().includes(publisherFilter)) return false;
+      if (
+        capabilityFilter &&
+        !p.scope_of_assessment.tested_capabilities.some((c) => c.toLowerCase().includes(capabilityFilter))
+      ) {
+        return false;
+      }
+      if (q) {
+        const hay = `${p.name} ${p.artifact_identity} ${p.publisher_name} ${p.version}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+  res.json(items);
+});
+
+app.get('/api/v1/public/trust/profiles/:id', (req: Request, res: Response) => {
+  const profile = dbState.trustProfiles.find((p) => p.profile_id === req.params.id);
+  if (!profile) return res.status(404).json({ error: 'Trust Profile not found.' });
+  if (profile.visibility !== 'PUBLIC') {
+    return res.status(403).json({ error: 'PRIVATE_TRUST_PROFILE', detail: 'This Trust Profile is private.' });
+  }
+  const pubView = toPublicTrustProfile(profile, dbState.trustProfiles);
+  const verification = verifyTrustProfileIntegrity(profile);
+  const latestActive = dbState.trustProfiles.find(
+    (p) =>
+      p.artifact_identity === profile.artifact_identity &&
+      p.visibility === 'PUBLIC' &&
+      computeEffectiveTrustStatus(p, dbState.trustProfiles) !== 'SUPERSEDED' &&
+      p.status !== 'REVOKED'
+  );
+  const outdatedNotice =
+    latestActive && latestActive.profile_id !== profile.profile_id
+      ? `Note: A newer assessment profile (${latestActive.version}, id=${latestActive.profile_id}) supersedes this report.`
+      : null;
+
+  res.json({
+    profile: pubView,
+    verification,
+    outdated_notice: outdatedNotice,
+  });
+});
+
+app.post('/api/v1/public/trust/profiles/:id/verify', (req: Request, res: Response) => {
+  const profile = dbState.trustProfiles.find((p) => p.profile_id === req.params.id);
+  if (!profile) return res.status(404).json({ error: 'Trust Profile not found.' });
+  if (profile.visibility !== 'PUBLIC') {
+    const authRes = resolveAuthContext(req);
+    if (!authRes.ok) {
+      return res.status(401).json({ error: 'UNAUTHORIZED', detail: 'Authentication required to verify a private Trust Profile.' });
+    }
+    if (authRes.ctx.tenantId !== profile.owner_tenant_id) {
+      return res.status(403).json({ error: 'PRIVATE_TRUST_PROFILE', detail: 'Access denied to private profile.' });
+    }
+  }
+  const verification = verifyTrustProfileIntegrity(
+    profile,
+    req.body?.tamper_probe || undefined
+  );
+  res.json({
+    ...verification,
+    effective_status: computeEffectiveTrustStatus(profile, dbState.trustProfiles),
+  });
+});
+
+app.get('/api/v1/trust/profiles/:id/badge.svg', (req: Request, res: Response) => {
+  const profile = dbState.trustProfiles.find((p) => p.profile_id === req.params.id);
+  if (!profile || profile.visibility !== 'PUBLIC') {
+    return res.status(404).send('Badge not available');
+  }
+  const svg = renderTrustProfileBadgeSvg(profile, dbState.trustProfiles);
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.send(svg);
+});
+
+// -------------------------------------------------------------
+// Batch 3 — Privacy-Respecting Growth & Adoption Analytics
+// -------------------------------------------------------------
+app.get('/api/v1/analytics/adoption', (_req: Request, res: Response) => {
+  dbState.adoptionAnalytics.active_projects_count = dbState.projects.length;
+  res.json(dbState.adoptionAnalytics);
+});
+
+app.post('/api/v1/analytics/events', requireAuth(ALL_AUTH_ROLES), (req: Request, res: Response) => {
+  const { event_type, attribution_consent } = req.body || {};
+  const result = recordAdoptionEvent({
+    analytics: dbState.adoptionAnalytics,
+    eventType: event_type,
+    activeProjectsCount: dbState.projects.length,
+    hasAttributionConsent: attribution_consent === true,
+  });
+  persistDatabase();
+  res.json(result);
+});
+
+app.put('/api/v1/analytics/privacy-settings', requireAuth(SUPERVISOR_ROLES), (req: Request, res: Response) => {
+  if (typeof req.body?.analytics_enabled === 'boolean') {
+    dbState.adoptionAnalytics.analytics_enabled = req.body.analytics_enabled;
+    persistDatabase();
+  }
+  res.json({ analytics_enabled: dbState.adoptionAnalytics.analytics_enabled });
 });
 
 // -------------------------------------------------------------

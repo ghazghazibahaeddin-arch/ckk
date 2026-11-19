@@ -1,24 +1,28 @@
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { createTenantSession, type TenantTestSession } from './_test_auth.ts';
 
 const baseUrl = 'http://localhost:3000';
 
 describe('CCK Assurance Capabilities Verification Suite', () => {
+  let session: TenantTestSession;
   let contractId = '';
   const isolatedOrder = `order:assurance-${Date.now()}`;
 
+  const apiFetch = (path: string, init: RequestInit = {}) =>
+    fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers: {
+        ...(init.headers as Record<string, string> | undefined),
+        Authorization: `Bearer ${session.token}`,
+      },
+    });
+
   before(async () => {
-    for (let i = 0; i < 10; i++) {
-      try {
-        const res = await fetch(`${baseUrl}/health`);
-        if (res.ok) break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 400));
-      }
-    }
+    session = await createTenantSession(baseUrl, 'assurance');
 
     // Seed fresh valid evidence fact for isolated assurance suite runs
-    await fetch(`${baseUrl}/api/v1/facts`, {
+    await apiFetch('/api/v1/facts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -38,7 +42,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     let executionId = '';
 
     test('1.1 Create Verified Action Contract with spending ceiling and invariants', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/contracts`, {
+      const res = await apiFetch(`/api/v1/contracts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -62,7 +66,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
 
     test('1.2 Execution Lifecycle: PREPARED -> AUTHORIZED -> EXECUTING -> SUCCEEDED', async () => {
       // Step A: Prepare
-      const prepRes = await fetch(`${baseUrl}/api/v1/contracts/${contractId}/prepare`, {
+      const prepRes = await apiFetch(`/api/v1/contracts/${contractId}/prepare`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -76,7 +80,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
       executionId = prepData.execution.execution_id;
 
       // Step B: Authorize
-      const authRes = await fetch(`${baseUrl}/api/v1/contracts/${contractId}/authorize`, {
+      const authRes = await apiFetch(`/api/v1/contracts/${contractId}/authorize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -89,7 +93,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
       assert.equal(authData.execution.state, 'AUTHORIZED');
 
       // Step C: Execute
-      const execRes = await fetch(`${baseUrl}/api/v1/contracts/${contractId}/execute`, {
+      const execRes = await apiFetch(`/api/v1/contracts/${contractId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -106,7 +110,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('1.3 Idempotency Enforcement: Duplicate execution returns cached result (zero re-execution)', async () => {
-      const replayRes = await fetch(`${baseUrl}/api/v1/contracts/${contractId}/execute`, {
+      const replayRes = await apiFetch(`/api/v1/contracts/${contractId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -124,7 +128,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     test('1.4 External Status Probe for UNKNOWN state prevents duplicate commits', async () => {
       const unknownKey = `idemp-unknown-${Date.now()}`;
       // Simulate network interruption resulting in UNKNOWN
-      const unkRes = await fetch(`${baseUrl}/api/v1/contracts/${contractId}/execute`, {
+      const unkRes = await apiFetch(`/api/v1/contracts/${contractId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -139,7 +143,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
       const unkExecId = unkData.execution_id;
 
       // Immediate retry must fail closed with 409 Conflict requiring status probe
-      const retryRes = await fetch(`${baseUrl}/api/v1/contracts/${contractId}/execute`, {
+      const retryRes = await apiFetch(`/api/v1/contracts/${contractId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -150,7 +154,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
       assert.equal(retryRes.status, 409);
 
       // Probe external status
-      const probeRes = await fetch(`${baseUrl}/api/v1/contracts/executions/${unkExecId}/probe-external`, {
+      const probeRes = await apiFetch(`/api/v1/contracts/executions/${unkExecId}/probe-external`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ simulated_outcome: 'SUCCEEDED' }),
@@ -162,7 +166,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('1.5 Compensation / Rollback transaction lifecycle', async () => {
-      const compRes = await fetch(`${baseUrl}/api/v1/contracts/executions/${executionId}/compensate`, {
+      const compRes = await apiFetch(`/api/v1/contracts/executions/${executionId}/compensate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Customer requested cancellation prior to batch clearing' }),
@@ -182,7 +186,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     let conflictId = '';
 
     test('2.1 Initial fact ingestion and version history recording', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/facts`, {
+      const res = await apiFetch(`/api/v1/facts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -198,7 +202,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
       assert.equal(data.state, 'VALID');
 
       // Verify history
-      const histRes = await fetch(`${baseUrl}/api/v1/facts/${testEntity}/status/history`);
+      const histRes = await apiFetch(`/api/v1/facts/${testEntity}/status/history`);
       assert.equal(histRes.status, 200);
       const history = await histRes.json();
       assert.ok(history.length >= 1);
@@ -206,7 +210,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('2.2 Contradictory observations across sources trigger CONFLICT without silent overwrite', async () => {
-      const conflictRes = await fetch(`${baseUrl}/api/v1/facts`, {
+      const conflictRes = await apiFetch(`/api/v1/facts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -224,7 +228,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
       conflictId = conflictData.conflict.conflict_id;
 
       // Ensure fact state transitioned to CONFLICT
-      const getFactRes = await fetch(`${baseUrl}/api/v1/facts`);
+      const getFactRes = await apiFetch(`/api/v1/facts`);
       const allFacts = await getFactRes.json();
       const conflictedFact = allFacts.find((f: any) => f.entity_id === testEntity);
       assert.ok(conflictedFact);
@@ -232,7 +236,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('2.3 Revalidation Notice automatically issued for dependent decisions', async () => {
-      const revRes = await fetch(`${baseUrl}/api/v1/revalidations`);
+      const revRes = await apiFetch(`/api/v1/revalidations`);
       assert.equal(revRes.status, 200);
       const notices = await revRes.json();
       const matched = notices.find((n: any) => n.fact_key === `${testEntity}.status` || n.fact_key === `${testEntity}:status`);
@@ -240,14 +244,14 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
       assert.equal(matched.status, 'PENDING_REVALIDATION');
 
       // Dismiss notice
-      const dismissRes = await fetch(`${baseUrl}/api/v1/revalidations/${matched.revalidation_id}/dismiss`, {
+      const dismissRes = await apiFetch(`/api/v1/revalidations/${matched.revalidation_id}/dismiss`, {
         method: 'POST',
       });
       assert.equal(dismissRes.status, 200);
     });
 
     test('2.4 Resolve Conflict with AUTHORITATIVE_SOURCE strategy updates fact and records provenance', async () => {
-      const resolveRes = await fetch(`${baseUrl}/api/v1/conflicts/${conflictId}/resolve`, {
+      const resolveRes = await apiFetch(`/api/v1/conflicts/${conflictId}/resolve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -273,7 +277,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     let mandateId = '';
 
     test('3.1 Create Delegated Agent Mandate with cryptographic signature', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/mandates`, {
+      const res = await apiFetch(`/api/v1/mandates`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -301,7 +305,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('3.2 Invariant INV_NEVER_EXCEED_LIMIT: Blocks action exceeding single-action ceiling', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/actions/evaluate`, {
+      const res = await apiFetch(`/api/v1/actions/evaluate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -320,7 +324,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('3.3 Invariant INV_APPROVED_DESTINATION_ONLY: Blocks mutation to unauthorized destination', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/actions/evaluate`, {
+      const res = await apiFetch(`/api/v1/actions/evaluate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -341,7 +345,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     test('3.4 Invariant INV_NEVER_CHARGE_TWICE: Prohibits double settlement on same order', async () => {
       const settledOrderId = `order:settled-${Date.now()}`;
       // 1. Establish initial successful settlement
-      const initialSettlementRes = await fetch(`${baseUrl}/api/v1/contracts/${contractId}/execute`, {
+      const initialSettlementRes = await apiFetch(`/api/v1/contracts/${contractId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -352,7 +356,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
       assert.ok(initialSettlementRes.ok);
 
       // 2. Second charge attempt against settled order must be BLOCKED by invariant
-      const duplicateRes = await fetch(`${baseUrl}/api/v1/actions/evaluate`, {
+      const duplicateRes = await apiFetch(`/api/v1/actions/evaluate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -379,7 +383,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     let unverifiedSkillId = '';
 
     test('4.1 Register skill: Unverified peer review marks skill as UNVERIFIED', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/skills`, {
+      const res = await apiFetch(`/api/v1/skills`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -401,7 +405,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('4.2 Invariant INV_AUTHORIZED_SKILLS_ONLY: Action Gate blocks unverified skill', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/actions/evaluate`, {
+      const res = await apiFetch(`/api/v1/actions/evaluate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -419,7 +423,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('4.3 Accredited review verification promotes skill to VALID', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/skills/${unverifiedSkillId}/review`, {
+      const res = await apiFetch(`/api/v1/skills/${unverifiedSkillId}/review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -437,12 +441,12 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('4.4 Skill Revocation transitions status to REVOKED and blocks execution', async () => {
-      const revokeRes = await fetch(`${baseUrl}/api/v1/skills/${unverifiedSkillId}/revoke`, {
+      const revokeRes = await apiFetch(`/api/v1/skills/${unverifiedSkillId}/revoke`, {
         method: 'POST',
       });
       assert.equal(revokeRes.status, 200);
 
-      const evalRes = await fetch(`${baseUrl}/api/v1/actions/evaluate`, {
+      const evalRes = await apiFetch(`/api/v1/actions/evaluate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -465,7 +469,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     let receiptId = '';
 
     test('5.1 Run controlled sandbox evaluation and generate tamper-hashed Impact Receipt', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/skills/skl-stripe-checkout/evaluate-impact`, {
+      const res = await apiFetch(`/api/v1/skills/skl-stripe-checkout/evaluate-impact`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -486,7 +490,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('5.2 Privacy Config: External sharing opt-in toggle requires explicit action', async () => {
-      const patchRes = await fetch(`${baseUrl}/api/v1/skills/impact-receipts/${receiptId}/privacy`, {
+      const patchRes = await apiFetch(`/api/v1/skills/impact-receipts/${receiptId}/privacy`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -510,7 +514,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     let replayPackId = '';
 
     test('6.1 Create real Incident linking affected agent, contract, and entity', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/incidents`, {
+      const res = await apiFetch(`/api/v1/incidents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -533,7 +537,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('6.2 Create versioned Correction Pack in DRAFT state', async () => {
-      const res = await fetch(`${baseUrl}/api/v1/incidents/${incidentId}/correction`, {
+      const res = await apiFetch(`/api/v1/incidents/${incidentId}/correction`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -559,7 +563,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
 
     test('6.3 Create sanitized Replay Pack and execute isolated replay test harness', async () => {
       // Create Replay Pack
-      const createRes = await fetch(`${baseUrl}/api/v1/incidents/${incidentId}/replay-pack`, {
+      const createRes = await apiFetch(`/api/v1/incidents/${incidentId}/replay-pack`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -573,7 +577,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
       replayPackId = rpk.replay_pack_id;
 
       // Run isolated replay harness
-      const runRes = await fetch(`${baseUrl}/api/v1/incidents/replay-packs/${replayPackId}/run`, {
+      const runRes = await apiFetch(`/api/v1/incidents/replay-packs/${replayPackId}/run`, {
         method: 'POST',
       });
       assert.equal(runRes.status, 200);
@@ -583,7 +587,7 @@ describe('CCK Assurance Capabilities Verification Suite', () => {
     });
 
     test('6.4 Supervisor approval gate promotes correction pack and resolves incident', async () => {
-      const approveRes = await fetch(`${baseUrl}/api/v1/incidents/corrections/${packId}/approve`, {
+      const approveRes = await apiFetch(`/api/v1/incidents/corrections/${packId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

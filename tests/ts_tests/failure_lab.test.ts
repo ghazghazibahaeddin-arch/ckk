@@ -1,13 +1,20 @@
-import { test, describe } from 'node:test';
+import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { createTenantSession, type TenantTestSession } from './_test_auth.ts';
 
 const BASE_URL = 'http://localhost:3000';
 
 describe('CCK Failure Lab Scenarios', () => {
+  let session: TenantTestSession;
+
+  before(async () => {
+    session = await createTenantSession(BASE_URL, 'failurelab');
+  });
+
   test('Scenario A: Inventory Drift executes deterministically', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/failure-lab/run`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({ scenario_id: 'scenario_a_inventory' }),
     });
 
@@ -25,7 +32,7 @@ describe('CCK Failure Lab Scenarios', () => {
   test('Scenario B: Permission Revocation executes deterministically', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/failure-lab/run`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({ scenario_id: 'scenario_b_permission' }),
     });
 
@@ -41,7 +48,7 @@ describe('CCK Failure Lab Scenarios', () => {
   test('Scenario C: Refund Dispute executes deterministically', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/failure-lab/run`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: session.headers,
       body: JSON.stringify({ scenario_id: 'scenario_c_refund' }),
     });
 

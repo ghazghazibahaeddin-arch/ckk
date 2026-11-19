@@ -98,9 +98,6 @@ export function AgentPlaygroundModal({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-tenant-id': currentUser.tenantId,
-          'x-user-id': currentUser.userId,
-          'x-user-role': currentUser.role,
         },
         body: JSON.stringify({ name: `${agent.name} Live Integration Key` }),
       });
@@ -197,9 +194,6 @@ export function AgentPlaygroundModal({
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-tenant-id': currentUser.tenantId,
-          'x-user-id': currentUser.userId,
-          'x-user-role': currentUser.role,
           ...(mintedApiKey ? { Authorization: `Bearer ${mintedApiKey}` } : {}),
         },
         body: JSON.stringify(payload),

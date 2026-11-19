@@ -16,10 +16,13 @@
 
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { createTenantSession, type TenantTestSession } from './_test_auth.ts';
 
 const BASE_URL = 'http://127.0.0.1:3000';
 
 describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
+  let alphaSession: TenantTestSession;
+  let bravoSession: TenantTestSession;
   let alphaProjectId: string;
   let alphaAgentId: string;
   let alphaKeyToken: string;
@@ -28,18 +31,21 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
   let alphaDelegationId: string;
 
   before(async () => {
+    alphaSession = await createTenantSession(BASE_URL, 'ext_alpha');
+    bravoSession = await createTenantSession(BASE_URL, 'ext_bravo');
+
     // 1. Setup Tenant Alpha project & agent
     const p1 = await fetch(`${BASE_URL}/api/v1/projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'tenant-alpha' },
-      body: JSON.stringify({ name: 'Alpha Production Workspace', tenant_id: 'tenant-alpha' }),
+      headers: alphaSession.headers,
+      body: JSON.stringify({ name: 'Alpha Production Workspace', tenant_id: alphaSession.tenantId }),
     });
     const p1Data = await p1.json();
     alphaProjectId = p1Data.project_id;
 
     const k1 = await fetch(`${BASE_URL}/api/v1/projects/${alphaProjectId}/keys`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: alphaSession.headers,
       body: JSON.stringify({ name: 'Alpha Gate Token' }),
     });
     const k1Data = await k1.json();
@@ -47,14 +53,14 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
 
     const a1 = await fetch(`${BASE_URL}/api/v1/agents`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'tenant-alpha' },
+      headers: alphaSession.headers,
       body: JSON.stringify({
         name: 'Alpha Settlement Bot',
         framework: 'langgraph',
         target_capability: 'orders.settle',
         target_resource: 'order:1099',
         project_id: alphaProjectId,
-        tenant_id: 'tenant-alpha',
+        tenant_id: alphaSession.tenantId,
       }),
     });
     const a1Data = await a1.json();
@@ -69,9 +75,9 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
     // 2. Create Tenant Alpha budget policy
     const b1 = await fetch(`${BASE_URL}/api/v1/budgets`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'tenant-alpha' },
+      headers: alphaSession.headers,
       body: JSON.stringify({
-        tenant_id: 'tenant-alpha',
+        tenant_id: alphaSession.tenantId,
         scope_type: 'AGENT',
         scope_id: alphaAgentId,
         limits: { max_budget_usd: 100, max_model_calls: 500, max_tool_calls: 1000 },
@@ -83,11 +89,11 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
     // 3. Create Tenant Alpha delegation
     const d1 = await fetch(`${BASE_URL}/api/v1/delegations`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'tenant-alpha' },
+      headers: alphaSession.headers,
       body: JSON.stringify({
         delegator_agent_id: alphaAgentId,
         delegatee_agent_id: 'agt-sub-worker-alpha',
-        tenant_id: 'tenant-alpha',
+        tenant_id: alphaSession.tenantId,
         allowed_actions: ['orders.settle'],
         allowed_resources: ['order:1099'],
       }),
@@ -98,8 +104,8 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
     // 4. Setup Tenant Bravo project
     const p2 = await fetch(`${BASE_URL}/api/v1/projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'tenant-bravo' },
-      body: JSON.stringify({ name: 'Bravo Workspace', tenant_id: 'tenant-bravo' }),
+      headers: bravoSession.headers,
+      body: JSON.stringify({ name: 'Bravo Workspace', tenant_id: bravoSession.tenantId }),
     });
     const p2Data = await p2.json();
     bravoProjectId = p2Data.project_id;
@@ -198,7 +204,7 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
   test('RED-15: Denial-of-Wallet Input Defense: Negative usage increments to /api/v1/budgets/record-usage are REJECTED with 400', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/budgets/record-usage`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: alphaSession.headers,
       body: JSON.stringify({
         budget_id: alphaBudgetId,
         actual_cost_usd: -50.0, // Malicious negative decrement attempt
@@ -214,7 +220,7 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
   test('RED-16: Cross-Tenant Agent Isolation: Tenant Bravo cannot delete Tenant Alpha agent', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/agents/${alphaAgentId}`, {
       method: 'DELETE',
-      headers: { 'x-tenant-id': 'tenant-bravo' },
+      headers: bravoSession.headers,
     });
 
     assert.equal(res.status, 403, 'Cross-tenant agent deletion must return 403 Forbidden');
@@ -225,7 +231,7 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
   test('RED-17: Cross-Tenant Delegation Isolation: Tenant Bravo cannot revoke Tenant Alpha delegation', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/delegations/${alphaDelegationId}/revoke`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'tenant-bravo' },
+      headers: bravoSession.headers,
       body: JSON.stringify({ reason: 'Malicious cross-tenant revoke' }),
     });
 
@@ -237,7 +243,7 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
   test('RED-18: Cross-Tenant Budget Isolation: Tenant Bravo cannot reset Tenant Alpha budget', async () => {
     const res = await fetch(`${BASE_URL}/api/v1/budgets/${alphaBudgetId}/reset`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': 'tenant-bravo' },
+      headers: bravoSession.headers,
     });
 
     assert.equal(res.status, 403, 'Cross-tenant budget reset must return 403 Forbidden');
@@ -271,7 +277,7 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
   test('RED-20: Customer Journey 12: Disconnect deauthorizes credentials, and export returns tamper-evident JSON', async () => {
     // 1. Export agent data before disconnect
     const exportRes = await fetch(`${BASE_URL}/api/v1/agents/${alphaAgentId}/export`, {
-      headers: { 'x-tenant-id': 'tenant-alpha' },
+      headers: alphaSession.headers,
     });
     assert.equal(exportRes.status, 200);
     const exportData = await exportRes.json();
@@ -282,14 +288,14 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
 
     // 2. Cross-tenant export attempt must be blocked
     const unauthExport = await fetch(`${BASE_URL}/api/v1/agents/${alphaAgentId}/export`, {
-      headers: { 'x-tenant-id': 'tenant-bravo' },
+      headers: bravoSession.headers,
     });
     assert.equal(unauthExport.status, 403);
 
     // 3. Disconnect agent
     const disconnectRes = await fetch(`${BASE_URL}/api/v1/agents/${alphaAgentId}/disconnect`, {
       method: 'POST',
-      headers: { 'x-tenant-id': 'tenant-alpha' },
+      headers: alphaSession.headers,
     });
     assert.equal(disconnectRes.status, 200);
     const disconnData = await disconnectRes.json();
@@ -298,7 +304,7 @@ describe('CCK Extended Security Red Team & Production Hardening Suite', () => {
     // 4. Verification: Disconnected agent cannot be deleted cross-tenant
     const crossDelete = await fetch(`${BASE_URL}/api/v1/agents/${alphaAgentId}`, {
       method: 'DELETE',
-      headers: { 'x-tenant-id': 'tenant-bravo' },
+      headers: bravoSession.headers,
     });
     assert.equal(crossDelete.status, 403);
   });

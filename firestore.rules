@@ -44,15 +44,17 @@ service cloud.firestore {
       allow get: if isOwner(userId);
       allow list: if false;
       allow create: if isOwner(userId)
+                    && request.auth.token.email_verified == true
                     && isValidId(userId)
                     && incoming().id == userId
                     && incoming().uid == userId
                     && incoming().email is string
                     && incoming().email.size() <= 254
-                    && incoming().role in ['developer', 'operator']
+                    && incoming().role in ['developer', 'operator', 'supervisor']
                     && isDocSizeValid(15);
       allow update: if isOwner(userId)
                     && isValidId(userId)
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'display_name', 'avatar_url', 'updated_at', 'last_login_at'])
                     && incoming().id == existing().id
                     && incoming().uid == existing().uid
                     && incoming().role == existing().role
@@ -78,6 +80,7 @@ service cloud.firestore {
       allow update: if isAuthenticated()
                     && isValidId(workspaceId)
                     && existing().owner_uid == request.auth.uid
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'members', 'updated_at', 'status'])
                     && incoming().owner_uid == existing().owner_uid
                     && incoming().workspace_id == existing().workspace_id
                     && isDocSizeValid(15);
@@ -100,6 +103,7 @@ service cloud.firestore {
       allow update: if isAuthenticated()
                     && isValidId(projectId)
                     && existing().owner_uid == request.auth.uid
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'description', 'environment', 'updated_at', 'status'])
                     && incoming().owner_uid == existing().owner_uid
                     && incoming().project_id == existing().project_id
                     && incoming().created_at == existing().created_at
@@ -125,6 +129,7 @@ service cloud.firestore {
       allow update: if isAuthenticated()
                     && isValidId(agentId)
                     && existing().owner_uid == request.auth.uid
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'status', 'trust_tier', 'target_capability', 'last_seen_at', 'updated_at', 'metadata'])
                     && incoming().owner_uid == existing().owner_uid
                     && incoming().agent_id == existing().agent_id
                     && incoming().created_at == existing().created_at
@@ -148,7 +153,10 @@ service cloud.firestore {
       allow update: if isAuthenticated()
                     && isValidId(factId)
                     && existing().owner_uid == request.auth.uid
+                    && incoming().diff(existing()).affectedKeys().hasOnly(['value', 'state', 'version', 'observed_at', 'expires_at', 'updated_at', 'confidence', 'source_id'])
                     && incoming().owner_uid == existing().owner_uid
+                    && incoming().entity_id == existing().entity_id
+                    && incoming().field_name == existing().field_name
                     && isDocSizeValid(20);
       allow delete: if isAuthenticated() && isValidId(factId) && existing().owner_uid == request.auth.uid;
     }
@@ -166,11 +174,10 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------
-    // Decision Receipts (Exact-ID Verifiable, Owner-Scoped List)
+    // Decision Receipts (Strict Owner-Isolated Read & Append-Only)
     // -------------------------------------------------------------
     match /receipts/{receiptId} {
-      allow get: if isValidId(receiptId);
-      allow list: if isAuthenticated() && existing().owner_uid == request.auth.uid;
+      allow get, list: if isAuthenticated() && existing().owner_uid == request.auth.uid;
       allow create: if isAuthenticated()
                     && isValidId(receiptId)
                     && incoming().owner_uid == request.auth.uid

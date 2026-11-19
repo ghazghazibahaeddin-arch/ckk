@@ -60,6 +60,7 @@ import {
   OctagonAlert,
   GitCompare,
   Award,
+  Globe,
 } from 'lucide-react';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import {
@@ -89,6 +90,10 @@ import { PreflightSimulatorView } from './components/unicorn/PreflightSimulatorV
 import { KillSwitchBreakerView } from './components/unicorn/KillSwitchBreakerView';
 import { PolicyStudioCiView } from './components/unicorn/PolicyStudioCiView';
 import { TrustVerifierView } from './components/unicorn/TrustVerifierView';
+import { FactRadarIntelligenceView } from './components/intelligence/FactRadarIntelligenceView';
+import { ToolMcpRuntimeView } from './components/intelligence/ToolMcpRuntimeView';
+import { SecureRuntimeProtectionView } from './components/intelligence/SecureRuntimeProtectionView';
+import { DeveloperEcosystemView } from './components/intelligence/DeveloperEcosystemView';
 import type {
   ActionContractRecord,
   ContractExecutionRecord,
@@ -342,13 +347,22 @@ type NavSection =
   | 'simulator'
   | 'killswitch'
   | 'policystudio'
-  | 'trustverifier';
+  | 'trustverifier'
+  | 'fact_intelligence'
+  | 'tool_mcp_gateway'
+  | 'secure_runtime'
+  | 'developer_ecosystem';
 
 export default function App() {
   // Navigation & Viewport State
   const [activeSection, setActiveSection] = useState<NavSection>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [showPublicRegistry, setShowPublicRegistry] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const params = new URLSearchParams(window.location.search);
+    return params.has('trust_profile') || params.get('public_registry') === '1';
+  });
 
   // CCK Decision Integrity Assurance State
   const [contracts, setContracts] = useState<ActionContractRecord[]>([]);
@@ -387,6 +401,7 @@ export default function App() {
     displayName: string;
     role: string;
     tenantId: string;
+    sessionToken?: string;
     authProvider?: 'google' | 'password' | 'sandbox';
   }>({
     userId: '',
@@ -394,6 +409,7 @@ export default function App() {
     displayName: '',
     role: 'supervisor',
     tenantId: '',
+    sessionToken: '',
     authProvider: 'password',
   });
   const [showAuthModal, setShowAuthModal] = useState(false);
@@ -569,7 +585,7 @@ export default function App() {
   };
 
   // -----------------------------------------------------------
-  // Authenticated Tenant Fetch Helper
+  // Authenticated Tenant Fetch Helper (Bearer Session Token)
   // -----------------------------------------------------------
   const authFetch = useCallback(
     (url: string, init?: RequestInit) => {
@@ -577,12 +593,12 @@ export default function App() {
       if (!headers.has('Content-Type') && (!init?.method || init.method !== 'GET')) {
         headers.set('Content-Type', 'application/json');
       }
-      headers.set('x-tenant-id', currentUser.tenantId);
-      headers.set('x-user-id', currentUser.userId);
-      headers.set('x-user-role', currentUser.role);
+      if (!headers.has('Authorization') && currentUser.sessionToken) {
+        headers.set('Authorization', `Bearer ${currentUser.sessionToken}`);
+      }
       return fetch(url, { ...init, headers });
     },
-    [currentUser]
+    [currentUser.sessionToken]
   );
 
   const fetchStatus = useCallback(async () => {
@@ -852,36 +868,21 @@ export default function App() {
   useEffect(() => {
     let active = true;
 
-    const bootstrapSession = async (
-      userPayload: {
-        userId: string;
-        username: string;
-        displayName: string;
-        role: string;
-        tenantId: string;
-        authProvider: 'google' | 'password' | 'sandbox';
-      },
+    const syncWorkspaceWithToken = async (
+      token: string,
+      tenantId: string,
       workspaceDocs?: { projects: Record<string, unknown>[]; agents: Record<string, unknown>[] }
     ) => {
+      if (!token || !tenantId) return;
       try {
-        await fetch('/api/v1/auth/firebase-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            uid: userPayload.userId,
-            email: userPayload.username,
-            displayName: userPayload.displayName,
-            role: userPayload.role,
-          }),
-        });
         await fetch('/api/v1/workspace/sync', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-tenant-id': userPayload.tenantId,
+            Authorization: `Bearer ${token}`,
           },
           body: JSON.stringify({
-            tenant_id: userPayload.tenantId,
+            tenant_id: tenantId,
             projects: workspaceDocs?.projects || [],
             agents: workspaceDocs?.agents || [],
           }),
@@ -894,38 +895,56 @@ export default function App() {
     const unsubscribe = subscribeToAuth(async (fbUser) => {
       if (!active) return;
       if (fbUser) {
-        const tenantId = `tenant_${fbUser.uid}`;
-        let resolvedRole = 'supervisor';
         let workspaceDocs: { projects: Record<string, unknown>[]; agents: Record<string, unknown>[] } = {
           projects: [],
           agents: [],
         };
         try {
-          const profile = await syncUserProfile(fbUser);
-          if ((profile as any)?.role) {
-            resolvedRole = String((profile as any).role);
-          }
+          await syncUserProfile(fbUser);
           const loaded = await loadUserWorkspaceFromFirestore(fbUser.uid);
           workspaceDocs = { projects: loaded.projects, agents: loaded.agents };
         } catch (err) {
           console.warn('Firestore profile/workspace load fallback:', err);
         }
 
-        const nextUser = {
-          userId: fbUser.uid,
-          username: fbUser.email || fbUser.uid,
-          displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'CCK Engineer',
-          role: resolvedRole,
-          tenantId,
-          authProvider: 'google' as const,
-        };
-        await bootstrapSession(nextUser, workspaceDocs);
-        if (!active) return;
-        localStorage.setItem('cck_user_session', JSON.stringify(nextUser));
-        setCurrentUser(nextUser);
-        setIsAuthenticated(true);
-        setAuthReady(true);
-        return;
+        try {
+          const idToken = await fbUser.getIdToken();
+          const sessRes = await fetch('/api/v1/auth/firebase-session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ idToken }),
+          });
+          if (!sessRes.ok) {
+            throw new Error('Firebase session exchange failed.');
+          }
+          const sessData = await sessRes.json();
+          const token = String(sessData.token || '');
+          const srvUser = sessData.user || {};
+          const nextUser = {
+            userId: String(srvUser.user_id || fbUser.uid),
+            username: String(srvUser.username || fbUser.email || fbUser.uid),
+            displayName: String(srvUser.display_name || fbUser.displayName || fbUser.email?.split('@')[0] || 'CCK Engineer'),
+            role: String(srvUser.role || 'supervisor'),
+            tenantId: String(srvUser.tenant_id || `tenant_${fbUser.uid}`),
+            sessionToken: token,
+            authProvider: 'google' as const,
+          };
+          await syncWorkspaceWithToken(token, nextUser.tenantId, workspaceDocs);
+          if (!active) return;
+          localStorage.setItem('cck_user_session', JSON.stringify(nextUser));
+          setCurrentUser(nextUser);
+          setIsAuthenticated(true);
+          setAuthReady(true);
+          return;
+        } catch (err) {
+          console.warn('Failed to exchange Firebase token for CCK session:', err);
+          localStorage.removeItem('cck_user_session');
+          if (active) {
+            setIsAuthenticated(false);
+            setAuthReady(true);
+          }
+          return;
+        }
       }
 
       // Check stored password / sandbox session when Firebase user is absent
@@ -933,22 +952,31 @@ export default function App() {
         const savedRaw = localStorage.getItem('cck_user_session');
         if (savedRaw) {
           const parsed = JSON.parse(savedRaw);
-          if (parsed?.userId && parsed?.tenantId && parsed.authProvider !== 'google') {
-            const restoredUser = {
-              userId: String(parsed.userId),
-              username: String(parsed.username || parsed.userId),
-              displayName: String(parsed.displayName || parsed.username || 'CCK Engineer'),
-              role: String(parsed.role || 'supervisor'),
-              tenantId: String(parsed.tenantId),
-              authProvider: (parsed.authProvider === 'sandbox' ? 'sandbox' : 'password') as 'sandbox' | 'password',
-            };
-            await bootstrapSession(restoredUser);
-            if (!active) return;
-            setCurrentUser(restoredUser);
-            setIsAuthenticated(true);
-            setAuthReady(true);
-            return;
+          if (parsed?.sessionToken && parsed.authProvider !== 'google') {
+            const meRes = await fetch('/api/v1/auth/me', {
+              headers: { Authorization: `Bearer ${parsed.sessionToken}` },
+            });
+            if (meRes.ok) {
+              const meData = await meRes.json();
+              const srvUser = meData.user || {};
+              const restoredUser = {
+                userId: String(srvUser.user_id || parsed.userId),
+                username: String(srvUser.username || parsed.username || parsed.userId),
+                displayName: String(srvUser.display_name || parsed.displayName || srvUser.username || 'CCK Engineer'),
+                role: String(srvUser.role || 'supervisor'),
+                tenantId: String(srvUser.tenant_id || parsed.tenantId),
+                sessionToken: String(parsed.sessionToken),
+                authProvider: (parsed.authProvider === 'sandbox' ? 'sandbox' : 'password') as 'sandbox' | 'password',
+              };
+              if (!active) return;
+              localStorage.setItem('cck_user_session', JSON.stringify(restoredUser));
+              setCurrentUser(restoredUser);
+              setIsAuthenticated(true);
+              setAuthReady(true);
+              return;
+            }
           }
+          localStorage.removeItem('cck_user_session');
         }
       } catch {
         localStorage.removeItem('cck_user_session');
@@ -1262,49 +1290,53 @@ export default function App() {
     try {
       const user = await signInWithGoogle();
       if (user) {
-        const tenantId = `tenant_${user.uid}`;
-        let resolvedRole = 'supervisor';
         let workspaceDocs: { projects: Record<string, unknown>[]; agents: Record<string, unknown>[] } = {
           projects: [],
           agents: [],
         };
         try {
-          const profile = await syncUserProfile(user);
-          if ((profile as any)?.role) resolvedRole = String((profile as any).role);
+          await syncUserProfile(user);
           const loaded = await loadUserWorkspaceFromFirestore(user.uid);
           workspaceDocs = { projects: loaded.projects, agents: loaded.agents };
         } catch {
           // Non-fatal fallback
         }
 
-        await fetch('/api/v1/auth/firebase-session', {
+        const idToken = await user.getIdToken();
+        const sessRes = await fetch('/api/v1/auth/firebase-session', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            uid: user.uid,
-            email: user.email || user.uid,
-            displayName: user.displayName || user.email || 'CCK Engineer',
-            role: resolvedRole,
-          }),
-        }).catch(() => {});
+          body: JSON.stringify({ idToken }),
+        });
+        const sessData = await sessRes.json().catch(() => ({}));
+        if (!sessRes.ok || !sessData.token) {
+          throw new Error(sessData.detail || 'تعذر توثيق جلسة Google مع خادم CCK');
+        }
+        const token = String(sessData.token);
+        const srvUser = sessData.user || {};
+        const nextUser = {
+          userId: String(srvUser.user_id || user.uid),
+          username: String(srvUser.username || user.email || user.uid),
+          displayName: String(srvUser.display_name || user.displayName || user.email || 'CCK Engineer'),
+          role: String(srvUser.role || 'supervisor'),
+          tenantId: String(srvUser.tenant_id || `tenant_${user.uid}`),
+          sessionToken: token,
+          authProvider: 'google' as const,
+        };
+
         await fetch('/api/v1/workspace/sync', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantId },
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
           body: JSON.stringify({
-            tenant_id: tenantId,
+            tenant_id: nextUser.tenantId,
             projects: workspaceDocs.projects,
             agents: workspaceDocs.agents,
           }),
         }).catch(() => {});
 
-        const nextUser = {
-          userId: user.uid,
-          username: user.email || user.uid,
-          displayName: user.displayName || user.email || 'CCK Engineer',
-          role: resolvedRole,
-          tenantId,
-          authProvider: 'google' as const,
-        };
         localStorage.setItem('cck_user_session', JSON.stringify(nextUser));
         setCurrentUser(nextUser);
         setIsAuthenticated(true);
@@ -1324,31 +1356,26 @@ export default function App() {
     setAuthLoading(true);
     setAuthError(null);
     try {
-      let sandboxUid = localStorage.getItem('cck_sandbox_uid') || '';
-      if (!sandboxUid) {
-        sandboxUid = `sandbox_${crypto.randomUUID().slice(0, 10)}`;
-        localStorage.setItem('cck_sandbox_uid', sandboxUid);
-      }
-      const res = await fetch('/api/v1/auth/firebase-session', {
+      const savedSandboxUid = localStorage.getItem('cck_sandbox_uid') || undefined;
+      const res = await fetch('/api/v1/auth/sandbox', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          uid: sandboxUid,
-          email: `${sandboxUid}@sandbox.cck.local`,
-          displayName: 'Sandbox Explorer',
-          role: 'supervisor',
-        }),
+        body: JSON.stringify({ sandbox_id: savedSandboxUid }),
       });
       if (!res.ok) {
         throw new Error('تعذر تهيئة بيئة التجربة المعزولة');
       }
       const data = await res.json();
+      if (data.sandbox_id) {
+        localStorage.setItem('cck_sandbox_uid', String(data.sandbox_id));
+      }
       const nextUser = {
-        userId: data.user?.user_id || sandboxUid,
-        username: data.user?.username || `${sandboxUid}@sandbox.cck.local`,
-        displayName: 'Sandbox Explorer',
-        role: data.user?.role || 'supervisor',
-        tenantId: data.user?.tenant_id || `tenant_${sandboxUid}`,
+        userId: String(data.user?.user_id || data.sandbox_id),
+        username: String(data.user?.username || 'sandbox@cck.local'),
+        displayName: String(data.user?.display_name || 'Sandbox Explorer'),
+        role: String(data.user?.role || 'supervisor'),
+        tenantId: String(data.user?.tenant_id),
+        sessionToken: String(data.token),
         authProvider: 'sandbox' as const,
       };
       localStorage.setItem('cck_user_session', JSON.stringify(nextUser));
@@ -1367,6 +1394,12 @@ export default function App() {
 
   const handleSignOutUser = async () => {
     try {
+      if (currentUser.sessionToken) {
+        await fetch('/api/v1/auth/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${currentUser.sessionToken}` },
+        }).catch(() => {});
+      }
       await signOutUser().catch(() => {});
       localStorage.removeItem('cck_user_session');
       setCurrentUser({
@@ -1375,6 +1408,7 @@ export default function App() {
         displayName: '',
         role: 'supervisor',
         tenantId: '',
+        sessionToken: '',
         authProvider: 'password',
       });
       setProjects([]);
@@ -1678,13 +1712,14 @@ export default function App() {
         body: JSON.stringify(authForm),
       });
       const data = await res.json();
-      if (res.ok && data.user) {
+      if (res.ok && data.user && data.token) {
         const nextUser = {
           userId: data.user.user_id,
           username: data.user.username,
           displayName: data.user.display_name,
           role: data.user.role,
           tenantId: data.user.tenant_id,
+          sessionToken: String(data.token),
           authProvider: 'password' as const,
         };
         localStorage.setItem('cck_user_session', JSON.stringify(nextUser));
@@ -1801,6 +1836,10 @@ export default function App() {
 
   const navItems = [
     { id: 'overview' as NavSection, label: 'Platform Overview', icon: Activity },
+    { id: 'fact_intelligence' as NavSection, label: 'Fact Freshness & Change Radar', icon: Zap },
+    { id: 'tool_mcp_gateway' as NavSection, label: 'Tool Drift & MCP Gateway', icon: Terminal },
+    { id: 'secure_runtime' as NavSection, label: 'Secure Runtime & Data Guard', icon: Lock },
+    { id: 'developer_ecosystem' as NavSection, label: 'Trust Registry & Open SDK', icon: Globe },
     { id: 'simulator' as NavSection, label: 'Pre-Flight Simulator', icon: GitCompare },
     { id: 'killswitch' as NavSection, label: 'Kill Switch & Breakers', icon: OctagonAlert, badge: activeKillSwitchesCount || undefined },
     { id: 'policystudio' as NavSection, label: 'Policy Studio & CI Gate', icon: Shield },
@@ -1845,6 +1884,21 @@ export default function App() {
             <ShieldCheck className="w-5 h-5 text-white" />
           </div>
           <span>جاري تجهيز بيئة العمل الآمنة...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated && showPublicRegistry) {
+    return (
+      <div dir="ltr" className={`min-h-screen p-4 sm:p-6 font-sans ${bgMain}`}>
+        <div className="max-w-7xl mx-auto">
+          <DeveloperEcosystemView
+            isDark={isDark}
+            publicOnlyMode={true}
+            onExitPublicMode={() => setShowPublicRegistry(false)}
+            onNotification={showNotification}
+          />
         </div>
       </div>
     );
@@ -2030,17 +2084,30 @@ export default function App() {
               </button>
             </form>
 
-            <div className="pt-3 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs">
-              <span className="text-slate-400 text-[11px]">تريد استكشاف المنصة فوراً دون إنشاء حساب؟</span>
-              <button
-                type="button"
-                disabled={authLoading}
-                onClick={handleEnterSandbox}
-                className="px-3.5 py-2 rounded-xl border border-indigo-500/40 bg-indigo-950/40 hover:bg-indigo-900/50 text-indigo-200 font-semibold text-xs transition-colors flex items-center space-x-1.5"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                <span>تجربة سريعة في بيئة معزولة (Sandbox)</span>
-              </button>
+            <div className="pt-3 border-t border-slate-800 flex flex-col gap-2 text-xs">
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-2">
+                <span className="text-slate-400 text-[11px]">تريد استكشاف المنصة فوراً دون إنشاء حساب؟</span>
+                <button
+                  type="button"
+                  disabled={authLoading}
+                  onClick={handleEnterSandbox}
+                  className="px-3.5 py-2 rounded-xl border border-indigo-500/40 bg-indigo-950/40 hover:bg-indigo-900/50 text-indigo-200 font-semibold text-xs transition-colors flex items-center space-x-1.5"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>تجربة سريعة في بيئة معزولة (Sandbox)</span>
+                </button>
+              </div>
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-2 border-t border-slate-800/70">
+                <span className="text-slate-400 text-[11px]">تحقق من سجل الثقة العام أو احصل على أداة الفحص الفوري بدون تسجيل:</span>
+                <button
+                  type="button"
+                  onClick={() => setShowPublicRegistry(true)}
+                  className="px-3.5 py-2 rounded-xl border border-cyan-500/40 bg-cyan-950/30 hover:bg-cyan-900/40 text-cyan-200 font-semibold text-xs transition-colors flex items-center space-x-1.5"
+                >
+                  <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Public Trust Registry &amp; CLI Scanner</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -4943,6 +5010,44 @@ if (verdict.decision === 'ALLOW') {
               apiFetch={authFetch}
               agents={agents}
               receipts={receipts}
+              onNotification={showNotification}
+            />
+          )}
+
+          {activeSection === 'fact_intelligence' && (
+            <FactRadarIntelligenceView
+              isDark={isDark}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
+              onNotification={showNotification}
+            />
+          )}
+
+          {activeSection === 'tool_mcp_gateway' && (
+            <ToolMcpRuntimeView
+              isDark={isDark}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
+              agents={agents}
+              onNotification={showNotification}
+            />
+          )}
+
+          {activeSection === 'secure_runtime' && (
+            <SecureRuntimeProtectionView
+              isDark={isDark}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
+              agents={agents}
+              onNotification={showNotification}
+            />
+          )}
+
+          {activeSection === 'developer_ecosystem' && (
+            <DeveloperEcosystemView
+              isDark={isDark}
+              tenantId={currentUser.tenantId}
+              apiFetch={authFetch}
               onNotification={showNotification}
             />
           )}

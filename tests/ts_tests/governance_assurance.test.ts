@@ -10,13 +10,21 @@
 
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
+import { createTenantSession, type TenantTestSession } from './_test_auth.ts';
 
 const baseUrl = 'http://localhost:3000';
+let session: TenantTestSession;
 
 async function makeRequest(method: string, path: string, body?: any) {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (session?.token) {
+    headers['Authorization'] = `Bearer ${session.token}`;
+  }
   const res = await fetch(`${baseUrl}${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   let data: any = null;
@@ -28,15 +36,7 @@ async function makeRequest(method: string, path: string, body?: any) {
 
 describe('CCK Advanced Agent Governance Verification Suite', () => {
   before(async () => {
-    // Wait for dev server on 3000
-    for (let i = 0; i < 15; i++) {
-      try {
-        const res = await fetch(`${baseUrl}/health`);
-        if (res.ok) break;
-      } catch {
-        await new Promise((r) => setTimeout(r, 300));
-      }
-    }
+    session = await createTenantSession(baseUrl, 'gov');
   });
 
   describe('Phase 1: Multi-Hop Delegation & Contextual Permission Gateway', () => {
@@ -48,7 +48,7 @@ describe('CCK Advanced Agent Governance Verification Suite', () => {
       const res = await makeRequest('POST', '/api/v1/delegations', {
         delegator_agent_id: 'agt-lead-orchestrator',
         delegatee_agent_id: 'agt-finance-specialist',
-        tenant_id: 'tenant_enterprise_01',
+        tenant_id: session.tenantId,
         allowed_actions: ['payments.process', 'refunds.issue', 'invoices.create'],
         allowed_resources: ['order:*', 'customer:*'],
         allowed_tools: ['stripe_charge', 'stripe_refund'],
@@ -189,7 +189,7 @@ describe('CCK Advanced Agent Governance Verification Suite', () => {
 
     test('2.2 Configure task budget with tight ceiling', async () => {
       const res = await makeRequest('POST', '/api/v1/budgets', {
-        tenant_id: 'tenant_enterprise_01',
+        tenant_id: session.tenantId,
         scope_type: 'TASK',
         scope_id: 'task-batch-scrape-99',
         limits: {
@@ -224,7 +224,7 @@ describe('CCK Advanced Agent Governance Verification Suite', () => {
 
     test('2.4 Action Gate BLOCKS dispatch when model calls limit is hit', async () => {
       const bRes = await makeRequest('POST', '/api/v1/budgets', {
-        tenant_id: 'tenant_enterprise_01',
+        tenant_id: session.tenantId,
         scope_type: 'AGENT',
         scope_id: 'agt-limited-calls-01',
         limits: {

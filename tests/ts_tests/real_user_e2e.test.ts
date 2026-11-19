@@ -19,11 +19,13 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
   };
 
   let tenantA = '';
+  let tokenA = '';
   let projectA = '';
   let agentA = '';
   let agentAKey = '';
 
   let tenantB = '';
+  let tokenB = '';
   let projectB = '';
   let agentB = '';
 
@@ -57,6 +59,7 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
     assert.ok(data.starter_project?.project_id);
 
     tenantA = data.user.tenant_id;
+    tokenA = data.token;
     projectA = data.starter_project.project_id;
 
     // Duplicate registration must return 409 Conflict
@@ -76,6 +79,7 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
     assert.equal(resB.status, 201);
     const dataB = await resB.json();
     tenantB = dataB.user.tenant_id;
+    tokenB = dataB.token;
     projectB = dataB.starter_project.project_id;
     assert.notEqual(tenantA, tenantB);
     assert.notEqual(projectA, projectB);
@@ -102,17 +106,28 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
 
   test('3. Isolated Sandbox & Firebase Session Provisioning + Workspace Sync', async () => {
     const sandboxUid = `sandbox_${ts}`;
-    const res = await fetch(`${BASE_URL}/api/v1/auth/firebase-session`, {
+    // Unverified/unsigned firebase-session payload without cryptographic Google RS256 idToken must fail-closed with 401
+    const unverifiedFbRes = await fetch(`${BASE_URL}/api/v1/auth/firebase-session`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         uid: sandboxUid,
-        displayName: 'Sandbox Explorer',
-        isSandbox: true,
+        displayName: 'Fake Unsigned User',
+      }),
+    });
+    assert.equal(unverifiedFbRes.status, 401);
+
+    // Sandbox provisioning runs via dedicated /api/v1/auth/sandbox endpoint
+    const res = await fetch(`${BASE_URL}/api/v1/auth/sandbox`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sandbox_id: sandboxUid,
       }),
     });
     assert.equal(res.status, 200);
     const data = await res.json();
+    assert.ok(data.token);
     assert.equal(data.user.tenant_id, `tenant_${sandboxUid}`);
     assert.equal(data.user.role, 'supervisor');
     assert.equal(data.user.auth_provider, 'sandbox');
@@ -122,7 +137,7 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
     // Cross-tenant workspace sync must return 403
     const crossSync = await fetch(`${BASE_URL}/api/v1/workspace/sync`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantA },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
       body: JSON.stringify({ tenant_id: tenantB, projects: [], agents: [] }),
     });
     assert.equal(crossSync.status, 403);
@@ -130,7 +145,7 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
     // Same-tenant workspace sync succeeds
     const validSync = await fetch(`${BASE_URL}/api/v1/workspace/sync`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantA },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
       body: JSON.stringify({
         tenant_id: tenantA,
         projects: [
@@ -157,7 +172,7 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
     // Create Agent for User A
     const createA = await fetch(`${BASE_URL}/api/v1/agents`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantA },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
       body: JSON.stringify({
         name: 'AliceSupportBot',
         project_id: projectA,
@@ -174,7 +189,7 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
     // Create Agent for User B
     const createB = await fetch(`${BASE_URL}/api/v1/agents`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantB },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenB}` },
       body: JSON.stringify({
         name: 'BobFinanceBot',
         project_id: projectB,
@@ -190,7 +205,7 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
 
     // User A listing agents must NOT see User B's agent
     const listARes = await fetch(`${BASE_URL}/api/v1/agents`, {
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     });
     const listA = await listARes.json();
     assert.ok(listA.some((a: any) => a.agent_id === agentA));
@@ -199,24 +214,24 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
     // User B cannot delete User A's project or inspect User A's keys
     const delProjCross = await fetch(`${BASE_URL}/api/v1/projects/${projectA}`, {
       method: 'DELETE',
-      headers: { 'x-tenant-id': tenantB },
+      headers: { Authorization: `Bearer ${tokenB}` },
     });
     assert.equal(delProjCross.status, 403);
 
     const getKeysCross = await fetch(`${BASE_URL}/api/v1/projects/${projectA}/keys`, {
-      headers: { 'x-tenant-id': tenantB },
+      headers: { Authorization: `Bearer ${tokenB}` },
     });
     assert.equal(getKeysCross.status, 403);
 
     const mintAgentKeyCross = await fetch(`${BASE_URL}/api/v1/agents/${agentA}/keys`, {
       method: 'POST',
-      headers: { 'x-tenant-id': tenantB },
+      headers: { Authorization: `Bearer ${tokenB}` },
     });
     assert.equal(mintAgentKeyCross.status, 403);
 
     const delAgentCross = await fetch(`${BASE_URL}/api/v1/agents/${agentA}`, {
       method: 'DELETE',
-      headers: { 'x-tenant-id': tenantB },
+      headers: { Authorization: `Bearer ${tokenB}` },
     });
     assert.equal(delAgentCross.status, 403);
   });
@@ -225,7 +240,7 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
     // Mint fresh live API key for User A's agent
     const keyRes = await fetch(`${BASE_URL}/api/v1/agents/${agentA}/keys`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-tenant-id': tenantA },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tokenA}` },
     });
     assert.equal(keyRes.status, 201);
     const keyData = await keyRes.json();
@@ -271,12 +286,12 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
 
     // Cross-tenant receipt access check: User B must be blocked (403) without share=true
     const crossReceipt = await fetch(`${BASE_URL}/api/v1/receipts/${receiptAId}`, {
-      headers: { 'x-tenant-id': tenantB },
+      headers: { Authorization: `Bearer ${tokenB}` },
     });
     assert.equal(crossReceipt.status, 403);
 
     const crossExport = await fetch(`${BASE_URL}/api/v1/receipts/${receiptAId}/export`, {
-      headers: { 'x-tenant-id': tenantB },
+      headers: { Authorization: `Bearer ${tokenB}` },
     });
     assert.equal(crossExport.status, 403);
 
@@ -361,7 +376,7 @@ describe('CCK Real-User Auth, Tenant Isolation & Live Agent E2E Suite', () => {
 
     // Verify agent telemetry counters updated cleanly in backend
     const agentsAfter = await (await fetch(`${BASE_URL}/api/v1/agents`, {
-      headers: { 'x-tenant-id': tenantA },
+      headers: { Authorization: `Bearer ${tokenA}` },
     })).json();
     const updatedA = agentsAfter.find((a: any) => a.agent_id === agentA);
     assert.ok(updatedA);

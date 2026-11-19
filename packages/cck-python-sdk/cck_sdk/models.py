@@ -39,6 +39,11 @@ class AgentAction:
     severity: ActionSeverity = ActionSeverity.MUTATION
     idempotency_key: Optional[str] = None
     action_id: Optional[str] = None
+    entity_id: Optional[str] = None
+    tool_id: Optional[str] = None
+    delegation_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    tenant_id: Optional[str] = None
 
 
 @dataclass
